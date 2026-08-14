@@ -23,8 +23,8 @@ pub struct Cli {
     pub json: bool,
     #[arg(long, global = true)]
     pub no_color: bool,
-    #[arg(long, global = true, default_value = "15s")]
-    pub timeout: String,
+    #[arg(long, global = true)]
+    pub timeout: Option<String>,
     #[arg(long, global = true)]
     pub quiet: bool,
     #[arg(long, global = true)]
@@ -50,6 +50,16 @@ impl Cli {
             return Err(AppError::usage(
                 "--review is interactive and unavailable with --json",
             ));
+        }
+        if matches!(
+            self.action(),
+            Action::MessageNew {
+                all_inboxes: true,
+                review: true,
+                ..
+            }
+        ) {
+            return Err(AppError::usage("--review conflicts with --all-inboxes"));
         }
         Ok(())
     }

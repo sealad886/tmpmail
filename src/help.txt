@@ -3,24 +3,24 @@ Fast, friendly temporary email
 Usage: tmpmail [OPTIONS] [COMMAND]
 
 Commands:
-  message      Work with messages (aliases: ls, read, latest, new-mail, unread)
-  inbox        Work with named inboxes (aliases: new, inboxes, use, watch)
-  attachment   List and safely save message attachments
-  provider     Inspect, authenticate, and configure providers
-  config       Inspect and update local configuration
-  copy         Copy an inbox address
-  doctor       Diagnose local configuration
+  message      Messages [ls, read, latest, new-mail, unread]
+  inbox        Named inboxes [new, inboxes, use, watch]
+  attachment   Attachments
+  provider     Providers
+  config       Configuration
+  copy         Copy address
+  doctor       Diagnose setup
 
 Options:
-      --inbox <NAME>             Select a saved inbox
-      --provider <PROVIDER>      Pin inbox creation to a provider
-      --no-provider <PROVIDER>   Exclude a provider from inbox creation
-      --json                     Emit the stable tmpmail/v1 JSON envelope
-      --no-color                 Disable color
-      --timeout <DURATION>       Total network deadline [default: 15s]
-      --quiet                    Suppress human output
-      --verbose                  Show additional diagnostics
-  -h, --help                     Print help
-  -V, --version                  Print version
+      --inbox <NAME>
+      --provider <PROVIDER>
+      --no-provider <PROVIDER>
+      --json
+      --no-color
+      --timeout <DURATION>  [default: 15s]
+      --quiet
+      --verbose
+  -h, --help
+  -V, --version
 
 Mail.tm functionality is powered by Mail.tm: https://mail.tm

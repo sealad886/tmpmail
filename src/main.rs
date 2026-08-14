@@ -2,19 +2,20 @@ use clap::Parser;
 use futures_util::StreamExt;
 use rand::distr::{Alphanumeric, SampleString};
 use serde_json::json;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use tmpmail::cli::{Action, Cli};
 use tmpmail::config::{Config, ConfigStore};
-use tmpmail::core::ProviderId;
+use tmpmail::core::{MessageKey, ProviderId};
 use tmpmail::error::AppError;
+use tmpmail::files::{atomic_write, publish_temporary, safe_basename, temporary_sibling};
 use tmpmail::paths::AppPaths;
 use tmpmail::providers::{
     DropMail, DropMailCredentials, MailTm, MailTmCredentials, Message, MessageSummary,
     ProviderError, ProviderFailure, creation_fallback_eligible, creation_order,
-    remaining_creation_time,
+    enforce_creation_deadline, remaining_creation_time,
 };
 use tmpmail::render::{Attempt, Envelope, Meta, html_to_text, safe_html_document, terminal_text};
 use tmpmail::secrets::{KeyringSecretStore, SecretStore};
@@ -24,7 +25,7 @@ fn main() -> ExitCode {
     if matches!(std::env::args_os().nth(1).as_deref(), Some(value) if value == "--help" || value == "-h")
         && std::env::args_os().nth(2).is_none()
     {
-        print!("{}", include_str!("help.txt"));
+        let _ = io::stdout().lock().write_all(include_bytes!("help.txt"));
         return ExitCode::SUCCESS;
     }
     if matches!(
@@ -32,7 +33,7 @@ fn main() -> ExitCode {
         Some(value) if value == "--version" || value == "-V"
     ) && std::env::args_os().nth(2).is_none()
     {
-        println!("tmpmail {}", env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(io::stdout().lock(), "tmpmail {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     let cli = Cli::parse();
@@ -61,9 +62,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
         Action::InboxList => output_inboxes(cli, &StateStore::at(&paths.state).load()?),
         Action::InboxUse { name } => {
             let state_store = StateStore::at(&paths.state);
-            let mut state = state_store.load()?;
-            state.set_active(&name)?;
-            state_store.save(&state)?;
+            state_store.update(|state| state.set_active(&name))?;
             output(cli, json!({"active_inbox": name}), format!("Using {name}"))
         }
         Action::ConfigShow => {
@@ -170,6 +169,19 @@ fn run(cli: &Cli) -> Result<(), AppError> {
             },
         ),
         Action::Copy { name } => copy_address(cli, &paths, name.as_deref()),
+        Action::InboxWatch {
+            names,
+            all,
+            existing,
+        } => run_async(
+            cli,
+            &paths,
+            NetworkAction::Watch {
+                names,
+                all,
+                existing,
+            },
+        ),
         Action::Doctor => {
             ConfigStore::at(&paths.config).load()?;
             let state = StateStore::at(&paths.state).load()?;
@@ -179,59 +191,95 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 format!("config ok\nstate ok\n{} inbox(es)", state.inboxes.len()),
             )
         }
-        action => Err(AppError::new(
-            "not_implemented",
-            format!("{} requires a provider milestone", action_name(&action)),
-            5,
-        )),
+        Action::MessageNew {
+            all_inboxes: true,
+            review: true,
+            ..
+        } => Err(AppError::usage("--review conflicts with --all-inboxes")),
     }
 }
 
 fn config_get(cli: &Cli, paths: &AppPaths, key: &str) -> Result<(), AppError> {
+    if let Some(name) = key
+        .strip_prefix("inbox.")
+        .and_then(|value| value.strip_suffix(".watch"))
+    {
+        let state = StateStore::at(&paths.state).load()?;
+        let enabled = state
+            .inboxes
+            .get(name)
+            .ok_or_else(|| AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8))?
+            .watch_enabled;
+        return output(
+            cli,
+            json!({"key": key, "value": enabled}),
+            enabled.to_string(),
+        );
+    }
     let config = ConfigStore::at(&paths.config).load()?;
     let value = config_value(&config, key)?;
     output(cli, json!({"key": key, "value": value}), value)
 }
 
 fn config_set(cli: &Cli, paths: &AppPaths, key: &str, value: &str) -> Result<(), AppError> {
-    let store = ConfigStore::at(&paths.config);
-    let mut config = store.load()?;
-    match key {
-        "timeout_seconds" => {
-            config.timeout_seconds = value
-                .parse()
-                .map_err(|_| AppError::usage("timeout_seconds must be an integer"))?
-        }
-        "color" => config.color = parse_bool(value)?,
-        "browser" => config.browser = parse_bool(value)?,
-        "max_attachment_bytes" => {
-            config.max_attachment_bytes = value
-                .parse()
-                .map_err(|_| AppError::usage("max_attachment_bytes must be an integer"))?
-        }
-        "providers.order" => {
-            config.providers.order = value
-                .split(',')
-                .map(str::trim)
-                .map(str::parse)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(AppError::usage)?;
-            if config.providers.order.is_empty() {
-                return Err(AppError::usage("providers.order cannot be empty"));
-            }
-        }
-        "providers.disabled" => {
-            config.providers.disabled = value
-                .split(',')
-                .filter(|v| !v.trim().is_empty())
-                .map(str::trim)
-                .map(str::parse)
-                .collect::<Result<_, _>>()
-                .map_err(AppError::usage)?
-        }
-        _ => return Err(AppError::usage(format!("unknown configuration key: {key}"))),
+    if let Some(name) = key
+        .strip_prefix("inbox.")
+        .and_then(|value| value.strip_suffix(".watch"))
+    {
+        let enabled = parse_bool(value)?;
+        StateStore::at(&paths.state).update(|state| {
+            let inbox = state.inboxes.get_mut(name).ok_or_else(|| {
+                AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8)
+            })?;
+            inbox.watch_enabled = enabled;
+            Ok(())
+        })?;
+        return output(
+            cli,
+            json!({"key": key, "value": enabled}),
+            format!("Set {key}"),
+        );
     }
-    store.save(&config)?;
+    let store = ConfigStore::at(&paths.config);
+    let config = store.update(|config| {
+        match key {
+            "timeout_seconds" => {
+                config.timeout_seconds = value
+                    .parse()
+                    .map_err(|_| AppError::usage("timeout_seconds must be an integer"))?
+            }
+            "color" => config.color = parse_bool(value)?,
+            "browser" => config.browser = parse_bool(value)?,
+            "max_attachment_bytes" => {
+                config.max_attachment_bytes = value
+                    .parse()
+                    .map_err(|_| AppError::usage("max_attachment_bytes must be an integer"))?
+            }
+            "secrets.file_fallback" => config.secrets_file_fallback = parse_bool(value)?,
+            "providers.order" => {
+                config.providers.order = value
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::parse)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(AppError::usage)?;
+                if config.providers.order.is_empty() {
+                    return Err(AppError::usage("providers.order cannot be empty"));
+                }
+            }
+            "providers.disabled" => {
+                config.providers.disabled = value
+                    .split(',')
+                    .filter(|v| !v.trim().is_empty())
+                    .map(str::trim)
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .map_err(AppError::usage)?
+            }
+            _ => return Err(AppError::usage(format!("unknown configuration key: {key}"))),
+        }
+        Ok(config.clone())
+    })?;
     output(
         cli,
         json!({"key": key, "value": config_value(&config, key)?}),
@@ -240,6 +288,9 @@ fn config_set(cli: &Cli, paths: &AppPaths, key: &str, value: &str) -> Result<(),
 }
 
 fn config_unset(cli: &Cli, paths: &AppPaths, key: &str) -> Result<(), AppError> {
+    if key.starts_with("inbox.") && key.ends_with(".watch") {
+        return config_set(cli, paths, key, "false");
+    }
     let defaults = Config::default();
     config_set(cli, paths, key, &config_value(&defaults, key)?)
 }
@@ -250,6 +301,7 @@ fn config_value(config: &Config, key: &str) -> Result<String, AppError> {
         "color" => config.color.to_string(),
         "browser" => config.browser.to_string(),
         "max_attachment_bytes" => config.max_attachment_bytes.to_string(),
+        "secrets.file_fallback" => config.secrets_file_fallback.to_string(),
         "providers.order" => config
             .providers
             .order
@@ -304,12 +356,14 @@ fn provider_auth(
             .trim()
             .to_owned()
     };
-    DropMail::new(&token, parse_duration(&cli.timeout)?).map_err(|error| error.into_app_error())?;
+    DropMail::new(&token, effective_timeout(cli, paths)?)
+        .map_err(|error| error.into_app_error())?;
     KeyringSecretStore.put("provider:dropmail", token.as_bytes())?;
     let store = ConfigStore::at(&paths.config);
-    let mut config = store.load()?;
-    config.providers.dropmail_ready = true;
-    if let Err(error) = store.save(&config) {
+    if let Err(error) = store.update(|config| {
+        config.providers.dropmail_ready = true;
+        Ok(())
+    }) {
         let _ = KeyringSecretStore.remove("provider:dropmail");
         return Err(error);
     }
@@ -359,6 +413,11 @@ enum NetworkAction {
         inbox: Option<String>,
         force: bool,
     },
+    Watch {
+        names: Vec<String>,
+        all: bool,
+        existing: bool,
+    },
 }
 
 fn run_async(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Result<(), AppError> {
@@ -370,7 +429,7 @@ fn run_async(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Result<(), A
 }
 
 async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Result<(), AppError> {
-    let timeout = parse_duration(&cli.timeout)?;
+    let timeout = effective_timeout(cli, paths)?;
     let mailtm = MailTm::new(timeout).map_err(|error| error.into_app_error())?;
     match action {
         NetworkAction::Domains(selected) => {
@@ -408,7 +467,7 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
         } => create_inbox(cli, paths, &mailtm, timeout, name, address, selected).await,
         NetworkAction::Remove(name) => {
             let store = StateStore::at(&paths.state);
-            let mut state = store.load()?;
+            let state = store.load()?;
             let inbox = state.inboxes.get(&name).cloned().ok_or_else(|| {
                 AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8)
             })?;
@@ -424,8 +483,7 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                     .await
                     .map_err(|error| error.into_app_error())?,
             }
-            state.remove(&name)?;
-            store.save(&state)?;
+            store.update(|state| state.remove(&name).map(|_| ()))?;
             KeyringSecretStore.remove(&inbox.secret_ref)?;
             output(cli, json!({"removed": name}), format!("Removed {name}"))
         }
@@ -444,14 +502,19 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let messages = fetch_messages(&mailtm, &mut credentials, timeout).await?;
             let newest = messages
-                .into_iter()
+                .iter()
                 .max_by(|a, b| a.created_at.cmp(&b.created_at))
                 .ok_or_else(|| AppError::new("message_not_found", "inbox is empty", 8))?;
             let message = fetch_message(&mailtm, &mut credentials, &newest.id, timeout).await?;
             output_message(cli, paths, &selected.name, &message, html, open)?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
-                save_acknowledgement(paths, &selected.name, &message.id)?;
+                save_acknowledgement(
+                    paths,
+                    &selected.name,
+                    message_key(&message),
+                    summary_keys(&messages),
+                )?;
             }
             persist_credentials(&selected.secret_ref, &credentials)
         }
@@ -463,11 +526,17 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             open,
         } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
+            let visible = fetch_messages(&mailtm, &mut credentials, timeout).await?;
             let message = fetch_message(&mailtm, &mut credentials, &message, timeout).await?;
             output_message(cli, paths, &selected.name, &message, html, open)?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
-                save_acknowledgement(paths, &selected.name, &message.id)?;
+                save_acknowledgement(
+                    paths,
+                    &selected.name,
+                    message_key(&message),
+                    summary_keys(&visible),
+                )?;
             }
             persist_credentials(&selected.secret_ref, &credentials)
         }
@@ -478,7 +547,7 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 .await?
                 .into_iter()
                 .filter(|message| {
-                    !message.seen && !state.is_acknowledged(&selected.name, &message.id)
+                    !message.seen && state.is_unseen(&selected.name, &summary_key(message))
                 })
                 .collect();
             persist_credentials(&selected.secret_ref, &credentials)?;
@@ -487,12 +556,44 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
         NetworkAction::Review(inbox) => {
             review_messages(cli, paths, &mailtm, timeout, inbox.as_deref()).await
         }
-        NetworkAction::NewAll => new_all_inboxes(cli, paths, timeout).await,
+        NetworkAction::NewAll => new_all_inboxes(cli, paths, &mailtm, timeout).await,
         NetworkAction::Ack { messages, inbox } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
-            for id in &messages {
-                acknowledge_message(&mailtm, &mut credentials, id).await?;
-                save_acknowledgement(paths, &selected.name, id)?;
+            let visible = fetch_messages(&mailtm, &mut credentials, timeout).await?;
+            let selected_messages = messages
+                .iter()
+                .map(|id| {
+                    visible
+                        .iter()
+                        .find(|message| &message.id == id)
+                        .ok_or_else(|| {
+                            AppError::new(
+                                "message_not_found",
+                                format!("message not found: {id}"),
+                                8,
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut completed = Vec::new();
+            for summary in selected_messages {
+                let result = async {
+                    acknowledge_message(&mailtm, &mut credentials, &summary.id).await?;
+                    save_acknowledgement(
+                        paths,
+                        &selected.name,
+                        summary_key(summary),
+                        summary_keys(&visible),
+                    )
+                }
+                .await;
+                if let Err(error) = result {
+                    if completed.is_empty() {
+                        return Err(error);
+                    }
+                    return render_ack_partial(cli, &messages, completed, &summary.id, error);
+                }
+                completed.push(summary.id.clone());
             }
             persist_credentials(&selected.secret_ref, &credentials)?;
             output(
@@ -533,6 +634,248 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             )
             .await
         }
+        NetworkAction::Watch {
+            names,
+            all,
+            existing,
+        } => watch_inboxes(cli, paths, &mailtm, timeout, names, all, existing).await,
+    }
+}
+
+fn render_ack_partial<T>(
+    cli: &Cli,
+    requested: &[String],
+    completed: Vec<String>,
+    failed: &str,
+    cause: AppError,
+) -> Result<T, AppError> {
+    let error = AppError::new(
+        "partial_operation",
+        "some messages were acknowledged before failure",
+        10,
+    );
+    if cli.json {
+        let mut envelope = Envelope::<serde_json::Value>::failure(&error, Meta::default());
+        envelope.data = Some(json!({
+            "acknowledged": completed,
+            "failed": failed,
+            "pending": requested.iter().skip_while(|id| id.as_str() != failed).cloned().collect::<Vec<_>>(),
+            "cause": {"code": cause.code(), "message": cause.to_string(), "retryable": cause.retryable()}
+        }));
+        println!(
+            "{}",
+            serde_json::to_string(&envelope).expect("JSON envelope")
+        );
+    } else {
+        eprintln!(
+            "Acknowledged {} message(s), then failed at {}: {}",
+            completed.len(),
+            failed,
+            cause
+        );
+    }
+    Err(error.silent())
+}
+
+struct WatchTarget {
+    inbox: tmpmail::core::Inbox,
+    credentials: ProviderCredentials,
+    dropmail: Option<DropMail>,
+}
+
+struct WatchPollError {
+    error: AppError,
+    retry_after: Option<std::time::Duration>,
+}
+
+impl From<AppError> for WatchPollError {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            retry_after: None,
+        }
+    }
+}
+
+fn watch_provider_error(error: ProviderError) -> WatchPollError {
+    let retry_after = error.retry_after();
+    WatchPollError {
+        error: error.into_app_error(),
+        retry_after,
+    }
+}
+
+async fn poll_watch_target(
+    target: &mut WatchTarget,
+    mailtm: &MailTm,
+) -> Result<Vec<MessageSummary>, WatchPollError> {
+    let messages = match &mut target.credentials {
+        ProviderCredentials::MailTm(credentials) => mailtm
+            .messages_with_refresh(credentials)
+            .await
+            .map_err(watch_provider_error)?,
+        ProviderCredentials::DropMail(credentials) => target
+            .dropmail
+            .as_ref()
+            .expect("DropMail target has adapter")
+            .messages(credentials)
+            .await
+            .map_err(watch_provider_error)?,
+    };
+    persist_credentials(&target.inbox.secret_ref, &target.credentials)
+        .map_err(WatchPollError::from)?;
+    Ok(messages)
+}
+
+async fn watch_inboxes(
+    cli: &Cli,
+    paths: &AppPaths,
+    mailtm: &MailTm,
+    timeout: std::time::Duration,
+    names: Vec<String>,
+    all: bool,
+    existing: bool,
+) -> Result<(), AppError> {
+    if cli.json {
+        return Err(AppError::usage("watch is a foreground human-mode command"));
+    }
+    let state = StateStore::at(&paths.state).load()?;
+    let selected = tmpmail::watch::select_inboxes(&state, &names, all)?;
+    if selected.is_empty() {
+        return Err(AppError::new(
+            "inbox_not_found",
+            "no saved inboxes to watch",
+            8,
+        ));
+    }
+    eprintln!(
+        "Watching {} inbox(es). Press Ctrl-C to stop.",
+        selected.len()
+    );
+    let floor = selected
+        .iter()
+        .map(|inbox| inbox.capabilities.minimum_poll_seconds)
+        .max()
+        .unwrap_or(10);
+    let mut dropmail_clients = std::collections::BTreeMap::<String, DropMail>::new();
+    let mut targets = Vec::with_capacity(selected.len());
+    for inbox in selected {
+        let credentials = load_credentials(&inbox)?;
+        let dropmail = match &credentials {
+            ProviderCredentials::DropMail(value) => {
+                if !dropmail_clients.contains_key(&value.token) {
+                    dropmail_clients.insert(
+                        value.token.clone(),
+                        DropMail::new(&value.token, timeout)
+                            .map_err(|error| error.into_app_error())?,
+                    );
+                }
+                dropmail_clients.get(&value.token).cloned()
+            }
+            ProviderCredentials::MailTm(_) => None,
+        };
+        targets.push(WatchTarget {
+            inbox,
+            credentials,
+            dropmail,
+        });
+    }
+    let mut failures = std::collections::BTreeMap::<String, u32>::new();
+    let mut retry_at = std::collections::BTreeMap::<String, std::time::Instant>::new();
+    let mut baselined: std::collections::BTreeSet<String> = if existing {
+        targets
+            .iter()
+            .map(|target| target.inbox.name.clone())
+            .collect()
+    } else {
+        state.watch_baselined.clone()
+    };
+    loop {
+        for batch in targets.chunks_mut(8) {
+            let polls = batch.iter_mut().map(|target| {
+                let name = target.inbox.name.clone();
+                let skip = retry_at
+                    .get(&name)
+                    .is_some_and(|when| *when > std::time::Instant::now());
+                async move {
+                    let result = if skip {
+                        None
+                    } else {
+                        Some(poll_watch_target(target, mailtm).await)
+                    };
+                    (name, result)
+                }
+            });
+            let completed = tokio::select! {
+                _ = tokio::signal::ctrl_c() => { eprintln!("Watch stopped."); return Ok(()); }
+                completed = futures_util::future::join_all(polls) => completed,
+            };
+            for (name, poll) in completed {
+                let Some(poll) = poll else {
+                    continue;
+                };
+                match poll {
+                    Ok(messages) => {
+                        failures.remove(&name);
+                        retry_at.remove(&name);
+                        let current = StateStore::at(&paths.state).load()?;
+                        let cursor = current.watch_cursors.get(&name);
+                        if !baselined.contains(&name) {
+                            let newest = tmpmail::watch::establish_baseline(
+                                &mut baselined,
+                                &name,
+                                &messages,
+                            );
+                            StateStore::at(&paths.state).update(|state| {
+                                state.watch_baselined.insert(name.clone());
+                                if let Some(newest) = newest {
+                                    state.watch_cursors.insert(name.clone(), newest);
+                                }
+                                Ok(())
+                            })?;
+                            continue;
+                        }
+                        for message in tmpmail::watch::messages_after(&messages, cursor) {
+                            println!(
+                                "{}\t{}\t{}\t{}",
+                                name,
+                                terminal_text(&message.id),
+                                terminal_text(&message.from.address),
+                                terminal_text(&message.subject)
+                            );
+                            io::stdout()
+                                .flush()
+                                .map_err(|e| AppError::state("watch_output", e.to_string()))?;
+                            StateStore::at(&paths.state).update(|state| {
+                                state
+                                    .watch_cursors
+                                    .insert(name.clone(), summary_key(message));
+                                Ok(())
+                            })?;
+                        }
+                    }
+                    Err(error) => {
+                        let count = failures.entry(name.clone()).or_default();
+                        *count = count.saturating_add(1);
+                        let seed = name.bytes().fold(0_u64, |value, byte| {
+                            value.wrapping_mul(31).wrapping_add(u64::from(byte))
+                        }) + u64::from(*count);
+                        let delay = tmpmail::watch::retry_delay_with_jitter(
+                            *count,
+                            std::time::Duration::from_secs(floor),
+                            error.retry_after,
+                            seed,
+                        );
+                        retry_at.insert(name.clone(), std::time::Instant::now() + delay);
+                        eprintln!("{}: {} (retry in {}s)", name, error.error, delay.as_secs());
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => { eprintln!("Watch stopped."); return Ok(()); }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(floor)) => {}
+        }
     }
 }
 
@@ -548,7 +891,7 @@ async fn review_messages(
     let messages: Vec<_> = fetch_messages(mailtm, &mut credentials, timeout)
         .await?
         .into_iter()
-        .filter(|message| !message.seen && !state.is_acknowledged(&selected.name, &message.id))
+        .filter(|message| !message.seen && state.is_unseen(&selected.name, &summary_key(message)))
         .collect();
     if messages.is_empty() {
         return output(cli, json!({"messages": []}), "No new messages.".to_owned());
@@ -589,11 +932,21 @@ async fn review_messages(
                 let message = fetch_message(mailtm, &mut credentials, &summary.id, timeout).await?;
                 output_message(cli, paths, &selected.name, &message, false, false)?;
                 acknowledge_message(mailtm, &mut credentials, &message.id).await?;
-                save_acknowledgement(paths, &selected.name, &message.id)?;
+                save_acknowledgement(
+                    paths,
+                    &selected.name,
+                    message_key(&message),
+                    summary_keys(&messages),
+                )?;
             }
             "a" => {
                 acknowledge_message(mailtm, &mut credentials, &summary.id).await?;
-                save_acknowledgement(paths, &selected.name, &summary.id)?;
+                save_acknowledgement(
+                    paths,
+                    &selected.name,
+                    summary_key(summary),
+                    summary_keys(&messages),
+                )?;
             }
             "s" => {}
             _ => eprintln!("Use r, a, s, or q."),
@@ -618,7 +971,7 @@ async fn create_inbox(
 ) -> Result<(), AppError> {
     let name = name.unwrap_or_else(|| "default".to_owned());
     validate_inbox_name(&name)?;
-    let mut state = StateStore::at(&paths.state).load()?;
+    let state = StateStore::at(&paths.state).load()?;
     if state.inboxes.contains_key(&name) {
         return Err(AppError::usage(format!("inbox already exists: {name}")));
     }
@@ -647,17 +1000,26 @@ async fn create_inbox(
     let mut attempts = Vec::new();
     let mut created = None;
     for provider_id in providers {
-        let remaining = remaining_creation_time(timeout, started.elapsed())
-            .ok_or_else(|| AppError::new("provider_timeout", "creation deadline expired", 7))?;
-        let attempt_started = std::time::Instant::now();
-        let result = match provider_id {
-            ProviderId::MailTm => create_mailtm(mailtm, address.as_deref())
-                .await
-                .map(CreatedCredentials::MailTm),
-            ProviderId::DropMail => create_dropmail(remaining)
-                .await
-                .map(CreatedCredentials::DropMail),
+        let Some(remaining) = remaining_creation_time(timeout, started.elapsed()) else {
+            return render_creation_error(
+                cli,
+                AppError::new("provider_timeout", "creation deadline expired", 7)
+                    .with_retryable(true),
+                attempts,
+            );
         };
+        let attempt_started = std::time::Instant::now();
+        let result = enforce_creation_deadline(provider_id, remaining, async {
+            match provider_id {
+                ProviderId::MailTm => create_mailtm(mailtm, address.as_deref())
+                    .await
+                    .map(CreatedCredentials::MailTm),
+                ProviderId::DropMail => create_dropmail(remaining)
+                    .await
+                    .map(CreatedCredentials::DropMail),
+            }
+        })
+        .await;
         match result {
             Ok(value) => {
                 attempts.push(Attempt {
@@ -678,13 +1040,18 @@ async fn create_inbox(
                     retryable,
                 });
                 if selected.is_some() || !creation_fallback_eligible(&error.failure) {
-                    return Err(error.into_app_error());
+                    return render_creation_error(cli, error.into_app_error(), attempts);
                 }
             }
         }
     }
-    let (provider_id, created) = created
-        .ok_or_else(|| AppError::new("provider_exhausted", "all eligible providers failed", 5))?;
+    let Some((provider_id, created)) = created else {
+        return render_creation_error(
+            cli,
+            AppError::new("provider_exhausted", "all eligible providers failed", 5),
+            attempts,
+        );
+    };
     let fallback_used = attempts.len() > 1;
     let (address_value, secret_ref, capabilities, serialized) = match &created {
         CreatedCredentials::MailTm(value) => (
@@ -703,17 +1070,23 @@ async fn create_inbox(
     let serialized =
         serialized.map_err(|error| AppError::state("credential_encode", error.to_string()))?;
     KeyringSecretStore.put(&secret_ref, &serialized)?;
-    state.insert(tmpmail::core::Inbox::new(
+    let inbox = tmpmail::core::Inbox::new(
         &name,
         &address_value,
         provider_id,
         &secret_ref,
         capabilities,
-    ));
-    if state.active_inbox.is_none() {
-        state.set_active(&name)?;
-    }
-    if let Err(error) = StateStore::at(&paths.state).save(&state) {
+    );
+    if let Err(error) = StateStore::at(&paths.state).update(|state| {
+        if state.inboxes.contains_key(&name) {
+            return Err(AppError::usage(format!("inbox already exists: {name}")));
+        }
+        state.insert(inbox);
+        if state.active_inbox.is_none() {
+            state.set_active(&name)?;
+        }
+        Ok(())
+    }) {
         cleanup_created(mailtm, timeout, &created).await;
         let _ = KeyringSecretStore.remove(&secret_ref);
         return Err(error);
@@ -741,6 +1114,37 @@ async fn create_inbox(
             attempts,
         },
     )
+}
+
+fn render_creation_error<T>(
+    cli: &Cli,
+    error: AppError,
+    attempts: Vec<Attempt>,
+) -> Result<T, AppError> {
+    if cli.json {
+        let envelope = Envelope::<serde_json::Value>::failure(
+            &error,
+            Meta {
+                provider: attempts.last().map(|attempt| attempt.provider),
+                fallback_used: false,
+                attempts,
+            },
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&envelope).expect("JSON envelope")
+        );
+        return Err(error.silent());
+    }
+    for attempt in &attempts {
+        eprintln!(
+            "{}: {} ({} ms)",
+            provider_display(attempt.provider),
+            attempt.reason,
+            attempt.duration_ms
+        );
+    }
+    Err(error)
 }
 
 async fn create_mailtm(
@@ -918,11 +1322,35 @@ async fn acknowledge_message(
     Ok(())
 }
 
-fn save_acknowledgement(paths: &AppPaths, inbox: &str, message: &str) -> Result<(), AppError> {
+fn save_acknowledgement(
+    paths: &AppPaths,
+    inbox: &str,
+    key: MessageKey,
+    visible: Vec<MessageKey>,
+) -> Result<(), AppError> {
     let store = StateStore::at(&paths.state);
-    let mut state = store.load()?;
-    state.acknowledge_id(inbox, message);
-    store.save(&state)
+    store.update(|state| {
+        state.acknowledge(inbox, key, visible);
+        Ok(())
+    })
+}
+
+fn summary_key(message: &MessageSummary) -> MessageKey {
+    MessageKey {
+        created_at: message.created_at.clone(),
+        id: message.id.clone(),
+    }
+}
+
+fn message_key(message: &Message) -> MessageKey {
+    MessageKey {
+        created_at: message.created_at.clone(),
+        id: message.id.clone(),
+    }
+}
+
+fn summary_keys(messages: &[MessageSummary]) -> Vec<MessageKey> {
+    messages.iter().map(summary_key).collect()
 }
 
 fn copy_address(cli: &Cli, paths: &AppPaths, selected: Option<&str>) -> Result<(), AppError> {
@@ -1001,18 +1429,7 @@ async fn save_attachment(
             9,
         ));
     }
-    let temporary = destination.with_extension(format!("{}.tmpmail-part", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| {
-            AppError::new(
-                "unsafe_path",
-                format!("could not create attachment: {error}"),
-                9,
-            )
-        })?;
+    let (temporary, mut file) = temporary_sibling(&destination)?;
     let mut received = 0_u64;
     let mut stream = response.bytes_stream();
     let result: Result<(), AppError> = async {
@@ -1051,10 +1468,7 @@ async fn save_attachment(
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    fs::rename(&temporary, &destination).map_err(|error| {
-        let _ = fs::remove_file(&temporary);
-        AppError::state("attachment_write", error.to_string())
-    })?;
+    publish_temporary(&temporary, &destination, request.force)?;
     persist_credentials(&selected.secret_ref, &credentials)?;
     output(
         cli,
@@ -1063,39 +1477,51 @@ async fn save_attachment(
     )
 }
 
-fn safe_basename(value: &str) -> Result<String, AppError> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value.contains('/')
-        || value.contains('\\')
-        || value.chars().any(|character| character.is_control())
-    {
-        return Err(AppError::new("unsafe_path", "unsafe filename refused", 9));
-    }
-    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
-    if reserved.iter().any(|name| value.eq_ignore_ascii_case(name)) {
-        return Err(AppError::new("unsafe_path", "reserved filename refused", 9));
-    }
-    Ok(value.to_owned())
-}
-
 async fn new_all_inboxes(
     cli: &Cli,
     paths: &AppPaths,
+    mailtm: &MailTm,
     timeout: std::time::Duration,
 ) -> Result<(), AppError> {
     let state = StateStore::at(&paths.state).load()?;
+    let mut dropmail_clients = std::collections::BTreeMap::<String, DropMail>::new();
+    for inbox in state.inboxes.values() {
+        if let ProviderCredentials::DropMail(credentials) = load_credentials(inbox)?
+            && !dropmail_clients.contains_key(&credentials.token)
+        {
+            dropmail_clients.insert(
+                credentials.token.clone(),
+                DropMail::new(&credentials.token, timeout)
+                    .map_err(|error| error.into_app_error())?,
+            );
+        }
+    }
     let mut jobs = Vec::new();
     for inbox in state.inboxes.values().cloned() {
         let mut credentials = load_credentials(&inbox)?;
+        let dropmail = match &credentials {
+            ProviderCredentials::DropMail(value) => dropmail_clients.get(&value.token),
+            ProviderCredentials::MailTm(_) => None,
+        };
         jobs.push(async move {
-            let mailtm = MailTm::new(timeout).map_err(|error| error.into_app_error())?;
-            let messages = fetch_messages(&mailtm, &mut credentials, timeout).await?;
+            let messages = match &mut credentials {
+                ProviderCredentials::MailTm(value) => mailtm
+                    .messages_with_refresh(value)
+                    .await
+                    .map_err(|error| error.into_app_error())?,
+                ProviderCredentials::DropMail(value) => dropmail
+                    .expect("DropMail client cached")
+                    .messages(value)
+                    .await
+                    .map_err(|error| error.into_app_error())?,
+            };
             Ok::<_, AppError>((inbox, credentials, messages))
         });
     }
-    let results = futures_util::future::join_all(jobs).await;
+    let results: Vec<_> = futures_util::stream::iter(jobs)
+        .buffer_unordered(8)
+        .collect()
+        .await;
     let mut rows = Vec::new();
     let mut human = Vec::new();
     let mut failures = Vec::new();
@@ -1104,7 +1530,7 @@ async fn new_all_inboxes(
             Ok((inbox, credentials, messages)) => {
                 persist_credentials(&inbox.secret_ref, &credentials)?;
                 for message in messages.into_iter().filter(|message| {
-                    !message.seen && !state.is_acknowledged(&inbox.name, &message.id)
+                    !message.seen && state.is_unseen(&inbox.name, &summary_key(message))
                 }) {
                     human.push(format!(
                         "{}\t{}\t{}\t{}",
@@ -1185,6 +1611,15 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, AppError> {
     Err(AppError::usage("timeout must use ms or s suffix"))
 }
 
+fn effective_timeout(cli: &Cli, paths: &AppPaths) -> Result<std::time::Duration, AppError> {
+    match cli.timeout.as_deref() {
+        Some(value) => parse_duration(value),
+        None => Ok(std::time::Duration::from_secs(
+            ConfigStore::at(&paths.config).load()?.timeout_seconds,
+        )),
+    }
+}
+
 fn validate_inbox_name(name: &str) -> Result<(), AppError> {
     if name.is_empty()
         || name.len() > 64
@@ -1253,8 +1688,7 @@ fn output_message(
             safe_basename(inbox)?,
             safe_basename(&message.id)?
         ));
-        fs::write(&path, safe_html_document(&body))
-            .map_err(|e| AppError::state("html_cache", e.to_string()))?;
+        atomic_write(&path, safe_html_document(&body).as_bytes(), true)?;
         if open {
             tmpmail::platform::open_browser(&path)?;
         }
@@ -1318,14 +1752,31 @@ fn output_providers(cli: &Cli, config: &Config) -> Result<(), AppError> {
 }
 
 fn output_provider_info(cli: &Cli, provider: ProviderId) -> Result<(), AppError> {
-    let (name, attribution) = match provider {
-        ProviderId::MailTm => ("Mail.tm", "Powered by Mail.tm"),
-        ProviderId::DropMail => ("DropMail", "DropMail disposable email"),
+    let (name, attribution, capabilities) = match provider {
+        ProviderId::MailTm => (
+            "Mail.tm",
+            "Powered by Mail.tm",
+            tmpmail::core::Capabilities::mailtm(),
+        ),
+        ProviderId::DropMail => (
+            "DropMail",
+            "DropMail disposable email",
+            tmpmail::core::Capabilities::dropmail(),
+        ),
     };
     output(
         cli,
-        json!({"provider": provider, "name": name, "attribution": attribution}),
-        format!("{name}\n{attribution}"),
+        json!({"provider": provider, "name": name, "attribution": attribution, "capabilities": capabilities}),
+        format!(
+            "{name}\n{attribution}\ncustom address: {}\ndomains: {}\nremote delete: {}\nattachments: {}\nrecoverable: {}\nminimum poll: {}s\nretention: {}",
+            capabilities.custom_address,
+            capabilities.domain_discovery,
+            capabilities.remote_delete,
+            capabilities.attachments,
+            capabilities.recoverable,
+            capabilities.minimum_poll_seconds,
+            capabilities.retention_hint
+        ),
     )
 }
 
@@ -1349,31 +1800,4 @@ fn output_with_meta(
         println!("{human}");
     }
     Ok(())
-}
-
-fn action_name(action: &Action) -> &'static str {
-    match action {
-        Action::MessageList { .. } => "message list",
-        Action::MessageRead { .. } => "message read",
-        Action::MessageLatest { .. } => "message latest",
-        Action::MessageNew { .. } => "message new",
-        Action::MessageAck { .. } => "message ack",
-        Action::InboxCreate { .. } => "inbox create",
-        Action::InboxRemove { .. } => "inbox remove",
-        Action::InboxWatch { .. } => "inbox watch",
-        Action::AttachmentList { .. } => "attachment list",
-        Action::AttachmentSave { .. } => "attachment save",
-        Action::ProviderDomains { .. } => "provider domains",
-        Action::ProviderAuth { .. } => "provider auth",
-        Action::ConfigGet { .. } => "config get",
-        Action::ConfigSet { .. } => "config set",
-        Action::ConfigUnset { .. } => "config unset",
-        Action::Copy { .. } => "copy",
-        Action::InboxList
-        | Action::InboxUse { .. }
-        | Action::ProviderList
-        | Action::ProviderInfo { .. }
-        | Action::ConfigShow
-        | Action::Doctor => "local command",
-    }
 }

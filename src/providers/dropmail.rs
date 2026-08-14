@@ -147,7 +147,7 @@ impl DropMail {
         &self,
         credentials: &mut DropMailCredentials,
     ) -> Result<Vec<MessageSummary>, ProviderError> {
-        let session = self.session(credentials).await?;
+        let session = self.session_with_restore(credentials).await?;
         credentials.expires_at = session.expires_at;
         Ok(session.mails.iter().map(summary).collect())
     }
@@ -157,7 +157,7 @@ impl DropMail {
         credentials: &mut DropMailCredentials,
         id: &str,
     ) -> Result<Message, ProviderError> {
-        let session = self.session(credentials).await?;
+        let session = self.session_with_restore(credentials).await?;
         credentials.expires_at = session.expires_at;
         session
             .mails
@@ -192,14 +192,14 @@ impl DropMail {
         session_id: &str,
         address: &str,
         restore_key: &str,
-    ) -> Result<(), ProviderError> {
-        let _: RestoreData = self
+    ) -> Result<String, ProviderError> {
+        let data: RestoreData = self
             .graphql(
                 "mutation RestoreAddress($session: ID!, $address: String!, $key: String!) { restoreAddress(input: {sessionId: $session, mailAddress: $address, restoreKey: $key}) { id } }",
                 json!({"session": session_id, "address": address, "key": restore_key}),
             )
             .await?;
-        Ok(())
+        Ok(data.restore_address.id)
     }
 
     pub async fn attachment(&self, download_url: &str) -> Result<Response, ProviderError> {
@@ -239,6 +239,30 @@ impl DropMail {
                 "DropMail session expired or was not found",
             )
         })
+    }
+
+    async fn session_with_restore(
+        &self,
+        credentials: &mut DropMailCredentials,
+    ) -> Result<SessionResource, ProviderError> {
+        match self.session(credentials).await {
+            Ok(session) => Ok(session),
+            Err(error) if error.failure == ProviderFailure::NotFound => {
+                let replacement = self.create().await?;
+                let address_id = self
+                    .restore_address(
+                        &replacement.session_id,
+                        &credentials.address,
+                        &credentials.restore_key,
+                    )
+                    .await?;
+                credentials.session_id = replacement.session_id;
+                credentials.address_id = address_id;
+                credentials.expires_at = replacement.expires_at;
+                self.session(credentials).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn graphql<T: DeserializeOwned>(
@@ -517,7 +541,6 @@ struct RestoreData {
 
 #[derive(Deserialize)]
 struct RestoreResource {
-    #[allow(dead_code)]
     id: String,
 }
 

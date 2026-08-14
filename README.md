@@ -38,6 +38,9 @@ tmpmail new-mail
 tmpmail message new --all-inboxes
 tmpmail message new --review
 tmpmail copy
+tmpmail watch work
+tmpmail watch --all
+tmpmail config set inbox.work.watch true
 ```
 
 `tmpmail latest` returns exactly the newest message in one inbox. `tmpmail
@@ -102,8 +105,27 @@ normal configuration, JSON, or diagnostics. The old `/tmp/tmpmail/email_address`
 file is deliberately not imported because it cannot restore authenticated v2
 inboxes.
 
+If no supported credential service is available, `tmpmail config set
+secrets.file_fallback true` explicitly opts into a `0600` `secrets.json` file
+beside local state. This is less protected than the OS credential store and is
+disabled by default.
+
 The complete architecture, provider contracts, security choices, and delivery
 evidence live under [`docs/`](docs/).
+
+Prebuilt archives are planned for macOS arm64/x86_64 and Linux arm64/x86_64.
+On Linux, unpack the matching archive, copy `tmpmail` into a directory on
+`PATH`, and optionally install `tmpmail.1` and shell completions. Release
+archives include SHA-256 checksums, a CycloneDX SBOM, and a local provenance
+record. The Homebrew formula remains a template until immutable release URLs
+exist; no formula or package has been published.
+
+`tmpmail watch` runs only in the foreground. It establishes an initial baseline
+unless `--existing` is supplied, polls providers concurrently in bounded
+batches, persists a cursor after each successfully printed event, and exits
+cleanly on Ctrl-C. It does not install a daemon or send desktop notifications.
+Named arguments temporarily include those inboxes. `--all` includes only
+inboxes opted in through `config set inbox.NAME.watch true`.
 
 ## License
 

@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use tmpmail::core::ProviderId;
 use tmpmail::providers::{
-    ProviderFailure, creation_fallback_eligible, creation_order, remaining_creation_time,
+    ProviderFailure, creation_fallback_eligible, creation_order, enforce_creation_deadline,
+    remaining_creation_time,
 };
 
 #[test]
@@ -81,4 +82,30 @@ fn all_attempts_share_one_total_deadline() {
         remaining_creation_time(Duration::from_secs(10), Duration::from_secs(12)),
         None
     );
+}
+
+#[tokio::test]
+async fn multi_step_attempt_cannot_exceed_remaining_deadline() {
+    let started = std::time::Instant::now();
+    let error = enforce_creation_deadline(ProviderId::MailTm, Duration::from_millis(20), async {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        Ok::<_, tmpmail::providers::ProviderError>(())
+    })
+    .await
+    .expect_err("deadline");
+    assert_eq!(error.failure, ProviderFailure::Timeout);
+    assert!(started.elapsed() < Duration::from_millis(100));
+}
+
+#[test]
+fn normalized_rate_limit_preserves_retry_after_for_watchers() {
+    let error = tmpmail::providers::ProviderError::for_provider(
+        ProviderId::MailTm,
+        ProviderFailure::RateLimited {
+            retry_after_seconds: Some(37),
+        },
+        "rate limited",
+    );
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(37)));
 }

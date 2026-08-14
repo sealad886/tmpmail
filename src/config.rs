@@ -1,5 +1,6 @@
 use crate::core::ProviderId;
 use crate::error::AppError;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
@@ -14,6 +15,7 @@ pub struct Config {
     pub color: bool,
     pub browser: bool,
     pub max_attachment_bytes: u64,
+    pub secrets_file_fallback: bool,
 }
 
 impl Default for Config {
@@ -24,6 +26,7 @@ impl Default for Config {
             color: true,
             browser: false,
             max_attachment_bytes: 25 * 1024 * 1024,
+            secrets_file_fallback: false,
         }
     }
 }
@@ -71,6 +74,30 @@ impl ConfigStore {
             .map_err(|error| AppError::state("config_encode", error.to_string()))?;
         atomic_write(&self.path, encoded.as_bytes())
     }
+
+    pub fn update<T>(
+        &self,
+        mutation: impl FnOnce(&mut Config) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| AppError::state("config_write", error.to_string()))?;
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+            .map_err(|error| AppError::state("config_lock", error.to_string()))?;
+        lock.lock_exclusive()
+            .map_err(|error| AppError::state("config_lock", error.to_string()))?;
+        let mut config = self.load()?;
+        let value = mutation(&mut config)?;
+        let result = self.save(&config);
+        let _ = FileExt::unlock(&lock);
+        result.map(|()| value)
+    }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
@@ -88,5 +115,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|error| AppError::state("config_write", error.to_string()))?;
-    fs::rename(&temporary, path).map_err(|error| AppError::state("config_write", error.to_string()))
+    fs::rename(&temporary, path)
+        .map_err(|error| AppError::state("config_write", error.to_string()))?;
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        directory
+            .sync_all()
+            .map_err(|error| AppError::state("config_write", error.to_string()))?;
+    }
+    Ok(())
 }

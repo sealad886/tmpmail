@@ -51,3 +51,12 @@ fn json_mode_rejects_interactive_review() {
         .expect_err("JSON review must be rejected");
     assert_eq!(error.code(), "usage");
 }
+
+#[test]
+fn review_rejects_all_inboxes_mode() {
+    let error = Cli::try_parse_from(["tmpmail", "message", "new", "--review", "--all-inboxes"])
+        .expect("syntax should parse")
+        .validate()
+        .expect_err("modes conflict");
+    assert_eq!(error.code(), "usage");
+}

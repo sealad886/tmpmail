@@ -8,6 +8,7 @@ use crate::core::ProviderId;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ pub struct Attachment {
     pub filename: String,
     pub content_type: String,
     pub size: u64,
+    #[serde(skip_serializing)]
     pub download_url: String,
 }
 
@@ -101,6 +103,22 @@ pub fn remaining_creation_time(total: Duration, elapsed: Duration) -> Option<Dur
     (!remaining.is_zero()).then_some(remaining)
 }
 
+pub async fn enforce_creation_deadline<T>(
+    provider: ProviderId,
+    remaining: Duration,
+    attempt: impl Future<Output = Result<T, ProviderError>>,
+) -> Result<T, ProviderError> {
+    tokio::time::timeout(remaining, attempt)
+        .await
+        .unwrap_or_else(|_| {
+            Err(ProviderError::for_provider(
+                provider,
+                ProviderFailure::Timeout,
+                "provider creation attempt timed out",
+            ))
+        })
+}
+
 #[derive(Debug)]
 pub struct ProviderError {
     pub provider: ProviderId,
@@ -132,6 +150,15 @@ impl ProviderError {
                 | ProviderFailure::Unavailable
                 | ProviderFailure::Timeout
         )
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self.failure {
+            ProviderFailure::RateLimited {
+                retry_after_seconds: Some(seconds),
+            } => Some(Duration::from_secs(seconds)),
+            _ => None,
+        }
     }
 
     pub fn into_app_error(self) -> AppError {

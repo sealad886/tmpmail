@@ -1,5 +1,9 @@
 use crate::error::AppError;
+use fs2::FileExt;
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 pub trait SecretStore: Send + Sync {
@@ -27,7 +31,7 @@ impl KeyringSecretStore {
 impl SecretStore for KeyringSecretStore {
     #[cfg(all(feature = "native-keyring", target_os = "linux"))]
     fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, AppError> {
-        match Self::entry(reference)?.get_secret() {
+        let native = Self::entry(reference).and_then(|entry| match entry.get_secret() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Err(AppError::new(
@@ -35,70 +39,223 @@ impl SecretStore for KeyringSecretStore {
                 "could not read credentials from OS credential store",
                 4,
             )),
-        }
+        });
+        fallback_get(reference, native)
     }
 
     #[cfg(all(feature = "native-keyring", target_os = "macos"))]
     fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, AppError> {
-        macos_keychain::get(reference)
+        fallback_get(reference, macos_keychain::get(reference))
     }
 
     #[cfg(any(
         not(feature = "native-keyring"),
         not(any(target_os = "macos", target_os = "linux"))
     ))]
-    fn get(&self, _reference: &str) -> Result<Option<Vec<u8>>, AppError> {
-        Err(keyring_disabled())
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, AppError> {
+        fallback_get(reference, Err(keyring_disabled()))
     }
 
     #[cfg(all(feature = "native-keyring", target_os = "linux"))]
     fn put(&self, reference: &str, secret: &[u8]) -> Result<(), AppError> {
-        Self::entry(reference)?.set_secret(secret).map_err(|_| {
-            AppError::new(
-                "keyring_write",
-                "could not store credentials in OS credential store",
-                4,
-            )
-        })
+        let native = Self::entry(reference).and_then(|entry| {
+            entry.set_secret(secret).map_err(|_| {
+                AppError::new(
+                    "keyring_write",
+                    "could not store credentials in OS credential store",
+                    4,
+                )
+            })
+        });
+        fallback_put(reference, secret, native)
     }
 
     #[cfg(all(feature = "native-keyring", target_os = "macos"))]
     fn put(&self, reference: &str, secret: &[u8]) -> Result<(), AppError> {
-        macos_keychain::put(reference, secret)
+        let native = macos_keychain::put(reference, secret);
+        fallback_put(reference, secret, native)
     }
 
     #[cfg(any(
         not(feature = "native-keyring"),
         not(any(target_os = "macos", target_os = "linux"))
     ))]
-    fn put(&self, _reference: &str, _secret: &[u8]) -> Result<(), AppError> {
-        Err(keyring_disabled())
+    fn put(&self, reference: &str, secret: &[u8]) -> Result<(), AppError> {
+        fallback_put(reference, secret, Err(keyring_disabled()))
     }
 
     #[cfg(all(feature = "native-keyring", target_os = "linux"))]
     fn remove(&self, reference: &str) -> Result<(), AppError> {
-        match Self::entry(reference)?.delete_credential() {
+        let native = Self::entry(reference).and_then(|entry| match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(AppError::new(
                 "keyring_delete",
                 "could not remove credentials from OS credential store",
                 4,
             )),
-        }
+        });
+        fallback_remove(reference, native)
     }
 
     #[cfg(all(feature = "native-keyring", target_os = "macos"))]
     fn remove(&self, reference: &str) -> Result<(), AppError> {
-        macos_keychain::remove(reference)
+        let native = macos_keychain::remove(reference);
+        fallback_remove(reference, native)
     }
 
     #[cfg(any(
         not(feature = "native-keyring"),
         not(any(target_os = "macos", target_os = "linux"))
     ))]
-    fn remove(&self, _reference: &str) -> Result<(), AppError> {
-        Err(keyring_disabled())
+    fn remove(&self, reference: &str) -> Result<(), AppError> {
+        fallback_remove(reference, Err(keyring_disabled()))
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtectedFileSecretStore {
+    path: PathBuf,
+}
+
+impl ProtectedFileSecretStore {
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    fn load(&self) -> Result<BTreeMap<String, Vec<u8>>, AppError> {
+        if !self.path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fs::metadata(&self.path)
+                .map_err(|_| secret_file_error())?
+                .permissions()
+                .mode()
+                & 0o077
+                != 0
+            {
+                return Err(AppError::new(
+                    "secret_file_permissions",
+                    "secret file permissions are not 0600",
+                    4,
+                ));
+            }
+        }
+        let bytes = fs::read(&self.path).map_err(|_| secret_file_error())?;
+        serde_json::from_slice(&bytes).map_err(|_| secret_file_error())
+    }
+
+    fn save(&self, values: &BTreeMap<String, Vec<u8>>) -> Result<(), AppError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|_| secret_file_error())?;
+        }
+        let temporary = self
+            .path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec(values).map_err(|_| secret_file_error())?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|_| secret_file_error())?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| secret_file_error())?;
+        fs::rename(&temporary, &self.path).map_err(|_| secret_file_error())?;
+        if let Some(parent) = self.path.parent()
+            && let Ok(directory) = fs::File::open(parent)
+        {
+            directory.sync_all().map_err(|_| secret_file_error())?;
+        }
+        Ok(())
+    }
+
+    fn lock(&self) -> Result<std::fs::File, AppError> {
+        let parent = self.path.parent().ok_or_else(secret_file_error)?;
+        fs::create_dir_all(parent).map_err(|_| secret_file_error())?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+            .map_err(|_| secret_file_error())?;
+        lock.lock_exclusive().map_err(|_| secret_file_error())?;
+        Ok(lock)
+    }
+}
+
+impl SecretStore for ProtectedFileSecretStore {
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, AppError> {
+        Ok(self.load()?.get(reference).cloned())
+    }
+    fn put(&self, reference: &str, secret: &[u8]) -> Result<(), AppError> {
+        let lock = self.lock()?;
+        let mut values = self.load()?;
+        values.insert(reference.to_owned(), secret.to_vec());
+        let result = self.save(&values);
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+    fn remove(&self, reference: &str) -> Result<(), AppError> {
+        let lock = self.lock()?;
+        let mut values = self.load()?;
+        values.remove(reference);
+        let result = self.save(&values);
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+}
+
+fn fallback_store() -> Option<ProtectedFileSecretStore> {
+    let paths = crate::paths::AppPaths::discover().ok()?;
+    let config = crate::config::ConfigStore::at(&paths.config).load().ok()?;
+    config
+        .secrets_file_fallback
+        .then(|| ProtectedFileSecretStore::at(paths.state.with_file_name("secrets.json")))
+}
+
+fn fallback_get(
+    reference: &str,
+    native: Result<Option<Vec<u8>>, AppError>,
+) -> Result<Option<Vec<u8>>, AppError> {
+    match native {
+        Ok(Some(secret)) => Ok(Some(secret)),
+        Ok(None) => fallback_store().map_or(Ok(None), |store| store.get(reference)),
+        Err(error) => fallback_store().map_or(Err(error), |store| store.get(reference)),
+    }
+}
+
+fn fallback_put(
+    reference: &str,
+    secret: &[u8],
+    native: Result<(), AppError>,
+) -> Result<(), AppError> {
+    match native {
+        Ok(()) => Ok(()),
+        Err(error) => fallback_store().map_or(Err(error), |store| store.put(reference, secret)),
+    }
+}
+
+fn fallback_remove(reference: &str, native: Result<(), AppError>) -> Result<(), AppError> {
+    match native {
+        Ok(()) => {
+            if let Some(store) = fallback_store() {
+                store.remove(reference)?;
+            }
+            Ok(())
+        }
+        Err(error) => fallback_store().map_or(Err(error), |store| store.remove(reference)),
+    }
+}
+
+fn secret_file_error() -> AppError {
+    AppError::new("secret_file", "protected secret file operation failed", 4)
 }
 
 #[cfg(not(feature = "native-keyring"))]

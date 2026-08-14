@@ -46,7 +46,13 @@ pub struct Capabilities {
     pub remote_delete: bool,
     pub attachments: bool,
     pub recoverable: bool,
+    #[serde(default = "default_retention_hint")]
+    pub retention_hint: String,
     pub minimum_poll_seconds: u64,
+}
+
+fn default_retention_hint() -> String {
+    "provider-managed".to_owned()
 }
 
 impl Capabilities {
@@ -57,6 +63,8 @@ impl Capabilities {
             remote_delete: true,
             attachments: true,
             recoverable: true,
+            retention_hint: "provider-managed; query Mail.tm terms before relying on retention"
+                .to_owned(),
             minimum_poll_seconds: 8,
         }
     }
@@ -64,10 +72,12 @@ impl Capabilities {
     pub fn dropmail() -> Self {
         Self {
             custom_address: false,
-            domain_discovery: false,
-            remote_delete: false,
+            domain_discovery: true,
+            remote_delete: true,
             attachments: true,
             recoverable: true,
+            retention_hint: "sessions expire after inactivity; access extends active sessions"
+                .to_owned(),
             minimum_poll_seconds: 10,
         }
     }
@@ -103,27 +113,36 @@ impl Inbox {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MessageKey {
+    pub created_at: String,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Acknowledgements {
     #[serde(default)]
-    pub high_water: u64,
+    pub high_water: Option<MessageKey>,
     #[serde(default)]
-    pub gaps: BTreeSet<u64>,
+    pub gaps: BTreeSet<MessageKey>,
 }
 
 impl Acknowledgements {
-    pub fn acknowledge(&mut self, sequence: u64) {
-        if sequence <= self.high_water {
-            self.gaps.remove(&sequence);
+    pub fn acknowledge(&mut self, key: MessageKey, visible: impl IntoIterator<Item = MessageKey>) {
+        if self.high_water.as_ref().is_some_and(|high| key <= *high) {
+            self.gaps.remove(&key);
             return;
         }
-        for skipped in (self.high_water + 1)..sequence {
-            self.gaps.insert(skipped);
+        for skipped in visible {
+            if skipped < key && self.is_unseen(&skipped) {
+                self.gaps.insert(skipped);
+            }
         }
-        self.high_water = sequence;
+        self.gaps.remove(&key);
+        self.high_water = Some(key);
     }
 
-    pub fn is_unseen(&self, sequence: u64) -> bool {
-        sequence > self.high_water || self.gaps.contains(&sequence)
+    pub fn is_unseen(&self, key: &MessageKey) -> bool {
+        self.high_water.as_ref().is_none_or(|high| key > high) || self.gaps.contains(key)
     }
 }

@@ -18,3 +18,12 @@ fn config_serialization_never_contains_secret_fields() {
         assert!(!encoded.contains(forbidden), "config leaked {forbidden}");
     }
 }
+
+#[test]
+fn provider_capabilities_match_implemented_control_plane() {
+    let dropmail = tmpmail::core::Capabilities::dropmail();
+    assert!(dropmail.domain_discovery);
+    assert!(dropmail.remote_delete);
+    assert!(dropmail.attachments);
+    assert!(dropmail.recoverable);
+}

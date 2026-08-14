@@ -103,19 +103,29 @@ async fn treats_partial_data_and_errors_as_failure() {
 }
 
 #[tokio::test]
-async fn normalizes_expired_session() {
+async fn restores_expired_session_then_retries() {
     let (base, handle) = server(vec![
         r#"{"data":{"session":null},"errors":[{"message":"session_not_found","extensions":{"code":"SESSION_NOT_FOUND"}}]}"#,
+        r#"{"data":{"introduceSession":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","addresses":[{"id":"temporary","address":"temporary@drop.test","restoreKey":"temporary-key"}]}}}"#,
+        r#"{"data":{"restoreAddress":{"id":"restored-address"}}}"#,
+        r#"{"data":{"session":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","mails":[]}}}"#,
     ]);
     let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
         .expect("provider");
 
-    let error = provider
-        .messages(&mut credentials())
-        .await
-        .expect_err("expired session");
-    assert_eq!(error.failure, ProviderFailure::NotFound);
-    handle.join().expect("server");
+    let mut credentials = credentials();
+    assert!(
+        provider
+            .messages(&mut credentials)
+            .await
+            .expect("restored")
+            .is_empty()
+    );
+    assert_eq!(credentials.session_id, "session-2");
+    assert_eq!(credentials.address_id, "restored-address");
+    let requests = handle.join().expect("server");
+    assert!(requests[1].contains("introduceSession"));
+    assert!(requests[2].contains("restoreAddress"));
 }
 
 #[tokio::test]
