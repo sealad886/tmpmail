@@ -8,6 +8,7 @@ use std::ffi::OsString;
     name = "tmpmail",
     version,
     about = "Fast, friendly temporary email",
+    long_about = "Fast, friendly temporary email\n\nMail.tm functionality is powered by Mail.tm: https://mail.tm",
     subcommand_help_heading = "Commands",
     disable_help_subcommand = true
 )]

@@ -44,6 +44,17 @@ impl AppState {
         self.active_inbox = Some(name.to_owned());
         Ok(())
     }
+
+    pub fn remove(&mut self, name: &str) -> Result<Inbox, AppError> {
+        let inbox = self.inboxes.remove(name).ok_or_else(|| {
+            AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8)
+        })?;
+        self.acknowledgements.remove(name);
+        if self.active_inbox.as_deref() == Some(name) {
+            self.active_inbox = self.inboxes.keys().next().cloned();
+        }
+        Ok(inbox)
+    }
 }
 
 #[derive(Debug, Clone)]

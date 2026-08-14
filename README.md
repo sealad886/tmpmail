@@ -3,6 +3,13 @@
 </h1>
 <p align="center"> A temporary email right from your terminal written in POSIX sh</p><br>
 
+> tmpmail v2 is under active development. Historical shell documentation stays
+> below until the Rust replacement reaches its release-ready milestone.
+>
+> tmpmail v2 is a fast, multi-backend temporary-email CLI for macOS and Linux.
+> Mail.tm functionality is powered by [Mail.tm](https://mail.tm), whose public
+> API requires visible attribution.
+
 <img src="images/demo.gif" align="right"> `tmpmail` is a command line utility written in POSIX `sh` that allows you to create a temporary email address
 and receive emails to the temporary email address. It uses 1secmail's [API](https://www.1secmail.com/api/)
 to receive emails.
