@@ -1,47 +1,52 @@
-.Dd 2020-10-01
-.Dt tmpmail 1
-.Os
-.Sh NAME
-.Nm tmpmail
-.Nd temporary email
-.Sh SYNOPSIS
-.Nm
-.Nm
-.Fl h | -version
-.Nm
-.Fl g Op Ar ADDRESS
-.Nm
-.Op Fl t | b Ar BROWSER
-.Fl r | Ar ID
-.Sh DESCRIPTION
-.Nm
-is a command line utility written in POSIX shell that allows you to create a temporary email address and receive emails to the temporary email address. It uses 1secmail's API to receive emails.
-.Ss Options and Arguments
-When called with no option and no argument,
-.Nm
-lists the messages in the inbox and their numeric IDs.
-When called with one argument,
-.Nm
-shows the email message with specified
-.Ar ID .
-.Bl -tag -width Ds
-.It Fl b , Fl Fl browser Ar BROWSER
-Specify
-.Ar BROWSER
-(default: w3m) that is used to render the HTML of the email
-.It Fl Fl clipboard-cmd Ar COMMAND
-Specify the COMMAND to use for copying the email address to your
-clipboard (default: xclip -selection c)
-.It Fl g , Fl Fl generate Op Ar ADDRESS
-Generate a new email address, either the specified
-.Ar ADDRESS ,
-or randomly create one
-.It Fl h , Fl Fl help
-Show help
-.It Fl r , Fl Fl recent
-View the most recent email message
-.It Fl t , Fl Fl text
-View the email as raw text, where all the HTML tags are removed.  Without this option, HTML is used.
-.It Fl Fl version
-Show version
-.El
+.TH TMPMAIL 1 "August 2026" "tmpmail 2.0.0" "User Commands"
+.SH NAME
+tmpmail \- fast multi-backend temporary email
+.SH SYNOPSIS
+.B tmpmail
+.RI [ options ]
+.RI [ command ]
+.SH DESCRIPTION
+tmpmail creates and monitors named disposable inboxes through Mail.tm and
+DropMail. With no command it lists messages for the active inbox.
+.SH COMMON COMMANDS
+.TP
+.B tmpmail new [NAME]
+Create an inbox. This is an alias for inbox create.
+.TP
+.B tmpmail [message list]
+List messages in the active or selected inbox.
+.TP
+.B tmpmail read MESSAGE [--peek] [--html [--open]]
+Render one message. Successful output acknowledges it unless --peek is used.
+.TP
+.B tmpmail latest
+Render exactly the newest message in one inbox.
+.TP
+.B tmpmail message new [--all-inboxes] [--review]
+List every locally unseen message without acknowledging it.
+.TP
+.B tmpmail attachment save MESSAGE ATTACHMENT [--force]
+Safely stream an attachment into the current directory.
+.SH OPTIONS
+.TP
+.B --inbox NAME
+Select a saved inbox for this command.
+.TP
+.B --provider PROVIDER, --no-provider PROVIDER
+Pin or exclude a provider for inbox creation.
+.TP
+.B --json
+Emit the stable tmpmail/v1 JSON envelope and never prompt.
+.TP
+.B --timeout DURATION
+Set the total network deadline using an ms or s suffix.
+.SH SECURITY
+Mail bodies, headers, and filenames are treated as untrusted. HTML is rendered
+as text unless an inert cached representation is explicitly requested. Secret
+tokens are accepted through secure input or stdin, never ordinary arguments.
+.SH PROVIDERS
+Mail.tm functionality is powered by Mail.tm (https://mail.tm). DropMail requires
+a current user-supplied API token.
+.SH SEE ALSO
+.BR open (1),
+.BR xdg-open (1)

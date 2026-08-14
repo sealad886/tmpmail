@@ -1,7 +1,10 @@
 use clap::Parser;
+use futures_util::StreamExt;
 use rand::distr::{Alphanumeric, SampleString};
 use serde_json::json;
-use std::io::{self, Read};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use tmpmail::cli::{Action, Cli};
 use tmpmail::config::{Config, ConfigStore};
@@ -13,11 +16,17 @@ use tmpmail::providers::{
     ProviderError, ProviderFailure, creation_fallback_eligible, creation_order,
     remaining_creation_time,
 };
-use tmpmail::render::{Attempt, Envelope, Meta};
+use tmpmail::render::{Attempt, Envelope, Meta, html_to_text, safe_html_document, terminal_text};
 use tmpmail::secrets::{KeyringSecretStore, SecretStore};
 use tmpmail::state::{AppState, StateStore};
 
 fn main() -> ExitCode {
+    if matches!(std::env::args_os().nth(1).as_deref(), Some(value) if value == "--help" || value == "-h")
+        && std::env::args_os().nth(2).is_none()
+    {
+        print!("{}", include_str!("help.txt"));
+        return ExitCode::SUCCESS;
+    }
     if matches!(
         std::env::args_os().nth(1).as_deref(),
         Some(value) if value == "--version" || value == "-V"
@@ -65,6 +74,9 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 .map_err(|error| AppError::state("config_encode", error.to_string()))?;
             output(cli, data, human.trim_end().to_owned())
         }
+        Action::ConfigGet { key } => config_get(cli, &paths, &key),
+        Action::ConfigSet { key, value } => config_set(cli, &paths, &key, &value),
+        Action::ConfigUnset { key } => config_unset(cli, &paths, &key),
         Action::ProviderList => output_providers(cli, &ConfigStore::at(&paths.config).load()?),
         Action::ProviderInfo { provider } => output_provider_info(cli, provider),
         Action::ProviderAuth {
@@ -89,13 +101,27 @@ fn run(cli: &Cli) -> Result<(), AppError> {
         ),
         Action::InboxRemove { name } => run_async(cli, &paths, NetworkAction::Remove(name)),
         Action::MessageList { inbox } => run_async(cli, &paths, NetworkAction::List(inbox)),
-        Action::MessageLatest { inbox, peek } => {
-            run_async(cli, &paths, NetworkAction::Latest { inbox, peek })
-        }
+        Action::MessageLatest {
+            inbox,
+            peek,
+            html,
+            open,
+        } => run_async(
+            cli,
+            &paths,
+            NetworkAction::Latest {
+                inbox,
+                peek,
+                html,
+                open,
+            },
+        ),
         Action::MessageRead {
             message,
             inbox,
             peek,
+            html,
+            open,
         } => run_async(
             cli,
             &paths,
@@ -103,6 +129,8 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 message,
                 inbox,
                 peek,
+                html,
+                open,
             },
         ),
         Action::MessageNew {
@@ -115,12 +143,33 @@ fn run(cli: &Cli) -> Result<(), AppError> {
             review: false,
             ..
         } => run_async(cli, &paths, NetworkAction::NewAll),
+        Action::MessageNew {
+            inbox,
+            all_inboxes: false,
+            review: true,
+        } => run_async(cli, &paths, NetworkAction::Review(inbox)),
         Action::MessageAck { messages, inbox } => {
             run_async(cli, &paths, NetworkAction::Ack { messages, inbox })
         }
         Action::AttachmentList { message, inbox } => {
             run_async(cli, &paths, NetworkAction::Attachments { message, inbox })
         }
+        Action::AttachmentSave {
+            message,
+            attachment,
+            inbox,
+            force,
+        } => run_async(
+            cli,
+            &paths,
+            NetworkAction::AttachmentSave {
+                message,
+                attachment,
+                inbox,
+                force,
+            },
+        ),
+        Action::Copy { name } => copy_address(cli, &paths, name.as_deref()),
         Action::Doctor => {
             ConfigStore::at(&paths.config).load()?;
             let state = StateStore::at(&paths.state).load()?;
@@ -135,6 +184,95 @@ fn run(cli: &Cli) -> Result<(), AppError> {
             format!("{} requires a provider milestone", action_name(&action)),
             5,
         )),
+    }
+}
+
+fn config_get(cli: &Cli, paths: &AppPaths, key: &str) -> Result<(), AppError> {
+    let config = ConfigStore::at(&paths.config).load()?;
+    let value = config_value(&config, key)?;
+    output(cli, json!({"key": key, "value": value}), value)
+}
+
+fn config_set(cli: &Cli, paths: &AppPaths, key: &str, value: &str) -> Result<(), AppError> {
+    let store = ConfigStore::at(&paths.config);
+    let mut config = store.load()?;
+    match key {
+        "timeout_seconds" => {
+            config.timeout_seconds = value
+                .parse()
+                .map_err(|_| AppError::usage("timeout_seconds must be an integer"))?
+        }
+        "color" => config.color = parse_bool(value)?,
+        "browser" => config.browser = parse_bool(value)?,
+        "max_attachment_bytes" => {
+            config.max_attachment_bytes = value
+                .parse()
+                .map_err(|_| AppError::usage("max_attachment_bytes must be an integer"))?
+        }
+        "providers.order" => {
+            config.providers.order = value
+                .split(',')
+                .map(str::trim)
+                .map(str::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(AppError::usage)?;
+            if config.providers.order.is_empty() {
+                return Err(AppError::usage("providers.order cannot be empty"));
+            }
+        }
+        "providers.disabled" => {
+            config.providers.disabled = value
+                .split(',')
+                .filter(|v| !v.trim().is_empty())
+                .map(str::trim)
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .map_err(AppError::usage)?
+        }
+        _ => return Err(AppError::usage(format!("unknown configuration key: {key}"))),
+    }
+    store.save(&config)?;
+    output(
+        cli,
+        json!({"key": key, "value": config_value(&config, key)?}),
+        format!("Set {key}"),
+    )
+}
+
+fn config_unset(cli: &Cli, paths: &AppPaths, key: &str) -> Result<(), AppError> {
+    let defaults = Config::default();
+    config_set(cli, paths, key, &config_value(&defaults, key)?)
+}
+
+fn config_value(config: &Config, key: &str) -> Result<String, AppError> {
+    Ok(match key {
+        "timeout_seconds" => config.timeout_seconds.to_string(),
+        "color" => config.color.to_string(),
+        "browser" => config.browser.to_string(),
+        "max_attachment_bytes" => config.max_attachment_bytes.to_string(),
+        "providers.order" => config
+            .providers
+            .order
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        "providers.disabled" => config
+            .providers
+            .disabled
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => return Err(AppError::usage(format!("unknown configuration key: {key}"))),
+    })
+}
+
+fn parse_bool(value: &str) -> Result<bool, AppError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(AppError::usage("boolean value must be true or false")),
     }
 }
 
@@ -194,13 +332,18 @@ enum NetworkAction {
     Latest {
         inbox: Option<String>,
         peek: bool,
+        html: bool,
+        open: bool,
     },
     Read {
         message: String,
         inbox: Option<String>,
         peek: bool,
+        html: bool,
+        open: bool,
     },
     New(Option<String>),
+    Review(Option<String>),
     NewAll,
     Ack {
         messages: Vec<String>,
@@ -209,6 +352,12 @@ enum NetworkAction {
     Attachments {
         message: String,
         inbox: Option<String>,
+    },
+    AttachmentSave {
+        message: String,
+        attachment: String,
+        inbox: Option<String>,
+        force: bool,
     },
 }
 
@@ -286,7 +435,12 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             persist_credentials(&selected.secret_ref, &credentials)?;
             output_messages(cli, messages)
         }
-        NetworkAction::Latest { inbox, peek } => {
+        NetworkAction::Latest {
+            inbox,
+            peek,
+            html,
+            open,
+        } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let messages = fetch_messages(&mailtm, &mut credentials, timeout).await?;
             let newest = messages
@@ -294,7 +448,7 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 .max_by(|a, b| a.created_at.cmp(&b.created_at))
                 .ok_or_else(|| AppError::new("message_not_found", "inbox is empty", 8))?;
             let message = fetch_message(&mailtm, &mut credentials, &newest.id, timeout).await?;
-            output_message(cli, &message)?;
+            output_message(cli, paths, &selected.name, &message, html, open)?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
                 save_acknowledgement(paths, &selected.name, &message.id)?;
@@ -305,10 +459,12 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             message,
             inbox,
             peek,
+            html,
+            open,
         } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let message = fetch_message(&mailtm, &mut credentials, &message, timeout).await?;
-            output_message(cli, &message)?;
+            output_message(cli, paths, &selected.name, &message, html, open)?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
                 save_acknowledgement(paths, &selected.name, &message.id)?;
@@ -327,6 +483,9 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 .collect();
             persist_credentials(&selected.secret_ref, &credentials)?;
             output_messages(cli, messages)
+        }
+        NetworkAction::Review(inbox) => {
+            review_messages(cli, paths, &mailtm, timeout, inbox.as_deref()).await
         }
         NetworkAction::NewAll => new_all_inboxes(cli, paths, timeout).await,
         NetworkAction::Ack { messages, inbox } => {
@@ -354,7 +513,93 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 .join("\n");
             output(cli, json!({"attachments": message.attachments}), human)
         }
+        NetworkAction::AttachmentSave {
+            message,
+            attachment,
+            inbox,
+            force,
+        } => {
+            save_attachment(
+                cli,
+                paths,
+                &mailtm,
+                timeout,
+                AttachmentSaveRequest {
+                    inbox,
+                    message,
+                    attachment,
+                    force,
+                },
+            )
+            .await
+        }
     }
+}
+
+async fn review_messages(
+    cli: &Cli,
+    paths: &AppPaths,
+    mailtm: &MailTm,
+    timeout: std::time::Duration,
+    inbox: Option<&str>,
+) -> Result<(), AppError> {
+    let (selected, mut credentials) = selected_credentials(paths, inbox)?;
+    let state = StateStore::at(&paths.state).load()?;
+    let messages: Vec<_> = fetch_messages(mailtm, &mut credentials, timeout)
+        .await?
+        .into_iter()
+        .filter(|message| !message.seen && !state.is_acknowledged(&selected.name, &message.id))
+        .collect();
+    if messages.is_empty() {
+        return output(cli, json!({"messages": []}), "No new messages.".to_owned());
+    }
+    loop {
+        for (index, message) in messages.iter().enumerate() {
+            println!(
+                "{}. {} — {}",
+                index + 1,
+                terminal_text(&message.from.address),
+                terminal_text(&message.subject)
+            );
+        }
+        eprint!("review [r/a/s NUMBER, q]: ");
+        io::stderr()
+            .flush()
+            .map_err(|e| AppError::state("review", e.to_string()))?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| AppError::state("review", e.to_string()))?;
+        let trimmed = input.trim();
+        if trimmed == "q" {
+            break;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let action = parts.next().unwrap_or_default();
+        let index = parts
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .and_then(|value| value.checked_sub(1));
+        let Some(summary) = index.and_then(|value| messages.get(value)) else {
+            eprintln!("Choose a listed message.");
+            continue;
+        };
+        match action {
+            "r" => {
+                let message = fetch_message(mailtm, &mut credentials, &summary.id, timeout).await?;
+                output_message(cli, paths, &selected.name, &message, false, false)?;
+                acknowledge_message(mailtm, &mut credentials, &message.id).await?;
+                save_acknowledgement(paths, &selected.name, &message.id)?;
+            }
+            "a" => {
+                acknowledge_message(mailtm, &mut credentials, &summary.id).await?;
+                save_acknowledgement(paths, &selected.name, &summary.id)?;
+            }
+            "s" => {}
+            _ => eprintln!("Use r, a, s, or q."),
+        }
+    }
+    persist_credentials(&selected.secret_ref, &credentials)
 }
 
 enum CreatedCredentials {
@@ -680,6 +925,161 @@ fn save_acknowledgement(paths: &AppPaths, inbox: &str, message: &str) -> Result<
     store.save(&state)
 }
 
+fn copy_address(cli: &Cli, paths: &AppPaths, selected: Option<&str>) -> Result<(), AppError> {
+    let state = StateStore::at(&paths.state).load()?;
+    let name = selected
+        .or(state.active_inbox.as_deref())
+        .ok_or_else(|| AppError::new("inbox_not_found", "no active inbox", 8))?;
+    let inbox = state
+        .inboxes
+        .get(name)
+        .ok_or_else(|| AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8))?;
+    tmpmail::platform::copy(&inbox.address)?;
+    output(
+        cli,
+        json!({"copied": true, "inbox": name}),
+        format!("Copied {}", inbox.address),
+    )
+}
+
+struct AttachmentSaveRequest {
+    inbox: Option<String>,
+    message: String,
+    attachment: String,
+    force: bool,
+}
+
+async fn save_attachment(
+    cli: &Cli,
+    paths: &AppPaths,
+    mailtm: &MailTm,
+    timeout: std::time::Duration,
+    request: AttachmentSaveRequest,
+) -> Result<(), AppError> {
+    let (selected, mut credentials) = selected_credentials(paths, request.inbox.as_deref())?;
+    let message = fetch_message(mailtm, &mut credentials, &request.message, timeout).await?;
+    let attachment = message
+        .attachments
+        .iter()
+        .find(|item| item.id == request.attachment)
+        .ok_or_else(|| AppError::new("attachment_not_found", "attachment not found", 8))?;
+    let filename = safe_basename(&attachment.filename)?;
+    let destination = PathBuf::from(&filename);
+    if destination.exists() && !request.force {
+        return Err(AppError::new(
+            "unsafe_path",
+            "destination exists; use --force to replace it",
+            9,
+        ));
+    }
+    if fs::symlink_metadata(&destination).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AppError::new(
+            "unsafe_path",
+            "refusing to replace a symbolic link",
+            9,
+        ));
+    }
+    let response = match &credentials {
+        ProviderCredentials::MailTm(value) => {
+            mailtm
+                .attachment(&value.token, &attachment.download_url)
+                .await
+        }
+        ProviderCredentials::DropMail(value) => {
+            DropMail::new(&value.token, timeout)
+                .map_err(|error| error.into_app_error())?
+                .attachment(&attachment.download_url)
+                .await
+        }
+    }
+    .map_err(|error| error.into_app_error())?;
+    let limit = ConfigStore::at(&paths.config).load()?.max_attachment_bytes;
+    if attachment.size > limit || response.content_length().is_some_and(|size| size > limit) {
+        return Err(AppError::new(
+            "attachment_too_large",
+            "attachment exceeds configured size limit",
+            9,
+        ));
+    }
+    let temporary = destination.with_extension(format!("{}.tmpmail-part", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| {
+            AppError::new(
+                "unsafe_path",
+                format!("could not create attachment: {error}"),
+                9,
+            )
+        })?;
+    let mut received = 0_u64;
+    let mut stream = response.bytes_stream();
+    let result: Result<(), AppError> = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| {
+                AppError::new(
+                    "attachment_download",
+                    "attachment download was interrupted",
+                    5,
+                )
+            })?;
+            received = received.saturating_add(chunk.len() as u64);
+            if received > limit {
+                return Err(AppError::new(
+                    "attachment_too_large",
+                    "attachment exceeds configured size limit",
+                    9,
+                ));
+            }
+            file.write_all(&chunk)
+                .map_err(|error| AppError::state("attachment_write", error.to_string()))?;
+        }
+        file.sync_all()
+            .map_err(|error| AppError::state("attachment_write", error.to_string()))?;
+        if attachment.size != 0 && received != attachment.size {
+            return Err(AppError::new(
+                "attachment_truncated",
+                "attachment size did not match provider metadata",
+                5,
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        AppError::state("attachment_write", error.to_string())
+    })?;
+    persist_credentials(&selected.secret_ref, &credentials)?;
+    output(
+        cli,
+        json!({"saved": destination, "bytes": received}),
+        format!("Saved {filename}"),
+    )
+}
+
+fn safe_basename(value: &str) -> Result<String, AppError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(AppError::new("unsafe_path", "unsafe filename refused", 9));
+    }
+    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"];
+    if reserved.iter().any(|name| value.eq_ignore_ascii_case(name)) {
+        return Err(AppError::new("unsafe_path", "reserved filename refused", 9));
+    }
+    Ok(value.to_owned())
+}
+
 async fn new_all_inboxes(
     cli: &Cli,
     paths: &AppPaths,
@@ -812,10 +1212,10 @@ fn output_messages(cli: &Cli, messages: Vec<MessageSummary>) -> Result<(), AppEr
             .map(|message| {
                 format!(
                     "{}\t{}\t{}\t{}",
-                    sanitize_terminal(&message.id),
-                    sanitize_terminal(&message.created_at),
-                    sanitize_terminal(&message.from.address),
-                    sanitize_terminal(&message.subject)
+                    terminal_text(&message.id),
+                    terminal_text(&message.created_at),
+                    terminal_text(&message.from.address),
+                    terminal_text(&message.subject)
                 )
             })
             .collect::<Vec<_>>()
@@ -824,22 +1224,42 @@ fn output_messages(cli: &Cli, messages: Vec<MessageSummary>) -> Result<(), AppEr
     output(cli, json!({"messages": messages}), human)
 }
 
-fn output_message(cli: &Cli, message: &Message) -> Result<(), AppError> {
+fn output_message(
+    cli: &Cli,
+    paths: &AppPaths,
+    inbox: &str,
+    message: &Message,
+    html: bool,
+    open: bool,
+) -> Result<(), AppError> {
+    let body = if message.text.trim().is_empty() {
+        html_to_text(&message.html.join("\n"))
+    } else {
+        terminal_text(&message.text)
+    };
     let human = format!(
         "From: {}\nSubject: {}\nDate: {}\n\n{}",
-        sanitize_terminal(&message.from.address),
-        sanitize_terminal(&message.subject),
-        sanitize_terminal(&message.created_at),
-        sanitize_terminal(&message.text)
+        terminal_text(&message.from.address),
+        terminal_text(&message.subject),
+        terminal_text(&message.created_at),
+        body
     );
-    output(cli, json!({"message": message}), human)
-}
-
-fn sanitize_terminal(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| matches!(character, '\n' | '\r' | '\t') || !character.is_control())
-        .collect()
+    output(cli, json!({"message": message}), human)?;
+    if html {
+        let directory = paths.cache.join("messages");
+        fs::create_dir_all(&directory).map_err(|e| AppError::state("html_cache", e.to_string()))?;
+        let path = directory.join(format!(
+            "{}-{}.html",
+            safe_basename(inbox)?,
+            safe_basename(&message.id)?
+        ));
+        fs::write(&path, safe_html_document(&body))
+            .map_err(|e| AppError::state("html_cache", e.to_string()))?;
+        if open {
+            tmpmail::platform::open_browser(&path)?;
+        }
+    }
+    Ok(())
 }
 
 fn output_inboxes(cli: &Cli, state: &AppState) -> Result<(), AppError> {

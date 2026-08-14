@@ -60,14 +60,23 @@ impl Cli {
                 inbox: self.inbox.clone(),
             },
             Some(Command::Message { command }) => message_action(command, self.inbox.clone()),
-            Some(Command::Read { message, peek }) => Action::MessageRead {
+            Some(Command::Read {
+                message,
+                peek,
+                html,
+                open,
+            }) => Action::MessageRead {
                 message: message.clone(),
                 inbox: self.inbox.clone(),
                 peek: *peek,
+                html: *html,
+                open: *open,
             },
-            Some(Command::Latest { peek }) => Action::MessageLatest {
+            Some(Command::Latest { peek, html, open }) => Action::MessageLatest {
                 inbox: self.inbox.clone(),
                 peek: *peek,
+                html: *html,
+                open: *open,
             },
             Some(Command::NewMail { all_inboxes }) | Some(Command::Unread { all_inboxes }) => {
                 Action::MessageNew {
@@ -145,12 +154,24 @@ impl Cli {
 fn message_action(command: &MessageCommand, inbox: Option<String>) -> Action {
     match command {
         MessageCommand::List => Action::MessageList { inbox },
-        MessageCommand::Read { message, peek } => Action::MessageRead {
+        MessageCommand::Read {
+            message,
+            peek,
+            html,
+            open,
+        } => Action::MessageRead {
             message: message.clone(),
             inbox,
             peek: *peek,
+            html: *html,
+            open: *open,
         },
-        MessageCommand::Latest { peek } => Action::MessageLatest { inbox, peek: *peek },
+        MessageCommand::Latest { peek, html, open } => Action::MessageLatest {
+            inbox,
+            peek: *peek,
+            html: *html,
+            open: *open,
+        },
         MessageCommand::New {
             all_inboxes,
             review,
@@ -222,11 +243,19 @@ enum Command {
         message: String,
         #[arg(long)]
         peek: bool,
+        #[arg(long)]
+        html: bool,
+        #[arg(long, requires = "html")]
+        open: bool,
     },
     /// Alias for `message latest`
     Latest {
         #[arg(long)]
         peek: bool,
+        #[arg(long)]
+        html: bool,
+        #[arg(long, requires = "html")]
+        open: bool,
     },
     /// Alias for `inbox create`
     New {
@@ -269,10 +298,18 @@ enum MessageCommand {
         message: String,
         #[arg(long)]
         peek: bool,
+        #[arg(long)]
+        html: bool,
+        #[arg(long, requires = "html")]
+        open: bool,
     },
     Latest {
         #[arg(long)]
         peek: bool,
+        #[arg(long)]
+        html: bool,
+        #[arg(long, requires = "html")]
+        open: bool,
     },
     New {
         #[arg(long)]
@@ -354,10 +391,14 @@ pub enum Action {
         message: String,
         inbox: Option<String>,
         peek: bool,
+        html: bool,
+        open: bool,
     },
     MessageLatest {
         inbox: Option<String>,
         peek: bool,
+        html: bool,
+        open: bool,
     },
     MessageNew {
         inbox: Option<String>,

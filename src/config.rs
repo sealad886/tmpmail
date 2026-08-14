@@ -13,6 +13,7 @@ pub struct Config {
     pub timeout_seconds: u64,
     pub color: bool,
     pub browser: bool,
+    pub max_attachment_bytes: u64,
 }
 
 impl Default for Config {
@@ -22,6 +23,7 @@ impl Default for Config {
             timeout_seconds: 15,
             color: true,
             browser: false,
+            max_attachment_bytes: 25 * 1024 * 1024,
         }
     }
 }
