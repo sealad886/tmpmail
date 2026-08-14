@@ -6,6 +6,7 @@ pub struct AppError {
     message: String,
     exit_code: u8,
     retryable: bool,
+    silent: bool,
 }
 
 impl AppError {
@@ -15,6 +16,7 @@ impl AppError {
             message: message.into(),
             exit_code,
             retryable: false,
+            silent: false,
         }
     }
 
@@ -41,6 +43,15 @@ impl AppError {
     pub fn with_retryable(mut self, retryable: bool) -> Self {
         self.retryable = retryable;
         self
+    }
+
+    pub fn silent(mut self) -> Self {
+        self.silent = true;
+        self
+    }
+
+    pub fn is_silent(&self) -> bool {
+        self.silent
     }
 }
 

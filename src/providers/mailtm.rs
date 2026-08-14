@@ -6,12 +6,24 @@ use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.mail.tm";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailTmCredentials {
     pub account_id: String,
     pub address: String,
     pub password: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for MailTmCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MailTmCredentials")
+            .field("account_id", &self.account_id)
+            .field("address", &self.address)
+            .field("password", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,13 +230,24 @@ impl MailTm {
     ) -> Result<Response, ProviderError> {
         let url = if download_url.starts_with('/') {
             self.url(download_url)
-        } else if download_url.starts_with(&self.base_url) {
-            download_url.to_owned()
         } else {
-            return Err(ProviderError::new(
-                ProviderFailure::InvalidResponse,
-                "Mail.tm returned an unsafe attachment URL",
-            ));
+            let base = reqwest::Url::parse(&self.base_url).ok();
+            let candidate = reqwest::Url::parse(download_url).ok();
+            match (base, candidate) {
+                (Some(base), Some(candidate))
+                    if base.scheme() == candidate.scheme()
+                        && base.host_str() == candidate.host_str()
+                        && base.port_or_known_default() == candidate.port_or_known_default() =>
+                {
+                    candidate.to_string()
+                }
+                _ => {
+                    return Err(ProviderError::new(
+                        ProviderFailure::InvalidResponse,
+                        "Mail.tm returned an unsafe attachment URL",
+                    ));
+                }
+            }
         };
         self.response(self.client.get(url).bearer_auth(token).send().await)
             .await

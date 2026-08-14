@@ -2,7 +2,7 @@ use crate::core::{Acknowledgements, Inbox};
 use crate::error::AppError;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,6 +15,8 @@ pub struct AppState {
     pub inboxes: BTreeMap<String, Inbox>,
     #[serde(default)]
     pub acknowledgements: BTreeMap<String, Acknowledgements>,
+    #[serde(default)]
+    pub acknowledged_ids: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Default for AppState {
@@ -24,6 +26,7 @@ impl Default for AppState {
             active_inbox: None,
             inboxes: BTreeMap::new(),
             acknowledgements: BTreeMap::new(),
+            acknowledged_ids: BTreeMap::new(),
         }
     }
 }
@@ -50,10 +53,24 @@ impl AppState {
             AppError::new("inbox_not_found", format!("inbox not found: {name}"), 8)
         })?;
         self.acknowledgements.remove(name);
+        self.acknowledged_ids.remove(name);
         if self.active_inbox.as_deref() == Some(name) {
             self.active_inbox = self.inboxes.keys().next().cloned();
         }
         Ok(inbox)
+    }
+
+    pub fn acknowledge_id(&mut self, inbox: &str, message: &str) {
+        self.acknowledged_ids
+            .entry(inbox.to_owned())
+            .or_default()
+            .insert(message.to_owned());
+    }
+
+    pub fn is_acknowledged(&self, inbox: &str, message: &str) -> bool {
+        self.acknowledged_ids
+            .get(inbox)
+            .is_some_and(|ids| ids.contains(message))
     }
 }
 

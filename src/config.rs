@@ -31,6 +31,7 @@ impl Default for Config {
 pub struct ProviderConfig {
     pub order: Vec<ProviderId>,
     pub disabled: BTreeSet<ProviderId>,
+    pub dropmail_ready: bool,
 }
 
 impl Default for ProviderConfig {
@@ -38,6 +39,7 @@ impl Default for ProviderConfig {
         Self {
             order: vec![ProviderId::MailTm, ProviderId::DropMail],
             disabled: BTreeSet::new(),
+            dropmail_ready: false,
         }
     }
 }

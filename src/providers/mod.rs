@@ -1,10 +1,14 @@
+mod dropmail;
 mod mailtm;
 
+pub use dropmail::{DropMail, DropMailCredentials};
 pub use mailtm::{MailTm, MailTmCredentials};
 
 use crate::core::ProviderId;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
@@ -63,6 +67,40 @@ pub enum ProviderFailure {
     InvalidResponse,
 }
 
+pub fn creation_fallback_eligible(failure: &ProviderFailure) -> bool {
+    matches!(
+        failure,
+        ProviderFailure::Unavailable
+            | ProviderFailure::Timeout
+            | ProviderFailure::RateLimited { .. }
+    )
+}
+
+pub fn creation_order(
+    explicit: Option<ProviderId>,
+    preferred: &[ProviderId],
+    command_excluded: &[ProviderId],
+    disabled: &BTreeSet<ProviderId>,
+    dropmail_ready: bool,
+    custom_address: bool,
+) -> Vec<ProviderId> {
+    if let Some(provider) = explicit {
+        return vec![provider];
+    }
+    preferred
+        .iter()
+        .copied()
+        .filter(|provider| !disabled.contains(provider))
+        .filter(|provider| !command_excluded.contains(provider))
+        .filter(|provider| *provider != ProviderId::DropMail || (dropmail_ready && !custom_address))
+        .collect()
+}
+
+pub fn remaining_creation_time(total: Duration, elapsed: Duration) -> Option<Duration> {
+    let remaining = total.saturating_sub(elapsed);
+    (!remaining.is_zero()).then_some(remaining)
+}
+
 #[derive(Debug)]
 pub struct ProviderError {
     pub provider: ProviderId,
@@ -72,8 +110,16 @@ pub struct ProviderError {
 
 impl ProviderError {
     pub fn new(failure: ProviderFailure, message: impl Into<String>) -> Self {
+        Self::for_provider(ProviderId::MailTm, failure, message)
+    }
+
+    pub fn for_provider(
+        provider: ProviderId,
+        failure: ProviderFailure,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            provider: ProviderId::MailTm,
+            provider,
             failure,
             safe_message: message.into(),
         }

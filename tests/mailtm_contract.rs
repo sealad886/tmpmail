@@ -148,7 +148,7 @@ async fn rejects_cross_origin_attachment_url_before_request() {
     let provider =
         MailTm::with_base_url("http://127.0.0.1:9", Duration::from_millis(50)).expect("provider");
     let error = provider
-        .attachment("token", "https://attacker.example/secret")
+        .attachment("token", "http://127.0.0.1.evil.example/secret")
         .await
         .expect_err("cross-origin URL");
     assert_eq!(error.failure, ProviderFailure::InvalidResponse);
@@ -193,4 +193,18 @@ async fn refreshes_expired_token_once_then_retries() {
     assert!(requests[0].contains("authorization: Bearer expired-token"));
     assert!(requests[1].starts_with("POST /token "));
     assert!(requests[2].contains("authorization: Bearer fresh-token"));
+}
+
+#[test]
+fn credential_debug_output_is_redacted() {
+    let credentials = tmpmail::providers::MailTmCredentials {
+        account_id: "acct-1".to_owned(),
+        address: "user@active.test".to_owned(),
+        password: "password-secret".to_owned(),
+        token: "jwt-secret".to_owned(),
+    };
+    let rendered = format!("{credentials:?}");
+    assert!(!rendered.contains("password-secret"));
+    assert!(!rendered.contains("jwt-secret"));
+    assert!(rendered.contains("[REDACTED]"));
 }
