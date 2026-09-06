@@ -1,0 +1,28 @@
+class Tmpmail < Formula
+  desc "Fast, friendly multi-backend temporary email CLI"
+  homepage "https://github.com/sealad886/tmpmail"
+  version "2.0.0"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "@AARCH64_MACOS_URL@"
+      sha256 "@AARCH64_MACOS_SHA256@"
+    else
+      url "@X86_64_MACOS_URL@"
+      sha256 "@X86_64_MACOS_SHA256@"
+    end
+  end
+
+  def install
+    bin.install "tmpmail"
+    man1.install "tmpmail.1"
+    bash_completion.install "completions/tmpmail.bash" => "tmpmail"
+    zsh_completion.install "completions/_tmpmail"
+    fish_completion.install "completions/tmpmail.fish"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/tmpmail --version")
+  end
+end

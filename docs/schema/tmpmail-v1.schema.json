@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sealad886/tmpmail/blob/v2.0.0/docs/schema/tmpmail-v1.schema.json",
+  "title": "tmpmail/v1 envelope",
+  "type": "object",
+  "required": ["schema", "ok", "meta"],
+  "properties": {
+    "schema": {"const": "tmpmail/v1"},
+    "ok": {"type": "boolean"},
+    "data": {},
+    "meta": {
+      "type": "object",
+      "required": ["provider", "fallback_used", "attempts"],
+      "properties": {
+        "provider": {"enum": ["mailtm", "dropmail", null]},
+        "fallback_used": {"type": "boolean"},
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider", "duration_ms", "reason", "retryable"],
+            "properties": {
+              "provider": {"enum": ["mailtm", "dropmail"]},
+              "duration_ms": {"type": "integer", "minimum": 0},
+              "reason": {"type": "string"},
+              "retryable": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"ok": {"const": true}}}, "then": {"required": ["data"], "not": {"required": ["error"]}}},
+    {"if": {"properties": {"ok": {"const": false}}}, "then": {"required": ["error"]}}
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,886 @@
+#compdef tmpmail
+
+autoload -U is-at-least
+
+_tmpmail() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_tmpmail_commands" \
+"*::: :->tmpmail" \
+&& ret=0
+    case $state in
+    (tmpmail)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-command-$line[1]:"
+        case $line[1] in
+            (message)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_tmpmail__subcmd__message_commands" \
+"*::: :->message" \
+&& ret=0
+
+    case $state in
+    (message)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-message-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--peek[]' \
+'--html[]' \
+'--open[]' \
+'(--html --open)--raw[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':message:_default' \
+&& ret=0
+;;
+(latest)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--peek[]' \
+'--html[]' \
+'--open[]' \
+'(--html --open)--raw[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(new)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--all-inboxes[]' \
+'--review[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(ack)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::messages:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(inbox)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_tmpmail__subcmd__inbox_commands" \
+"*::: :->inbox" \
+&& ret=0
+
+    case $state in
+    (inbox)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-inbox-command-$line[1]:"
+        case $line[1] in
+            (create)
+_arguments "${_arguments_options[@]}" : \
+'--address=[]:ADDRESS:_default' \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::name:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(use)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(watch)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--all[]' \
+'--existing[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::names:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(attachment)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_tmpmail__subcmd__attachment_commands" \
+"*::: :->attachment" \
+&& ret=0
+
+    case $state in
+    (attachment)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-attachment-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':message:_default' \
+&& ret=0
+;;
+(save)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--force[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':message:_default' \
+':attachment:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(provider)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_tmpmail__subcmd__provider_commands" \
+"*::: :->provider" \
+&& ret=0
+
+    case $state in
+    (provider)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-provider-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(domains)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::provider:_default' \
+&& ret=0
+;;
+(auth)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--token-stdin[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':provider:_default' \
+&& ret=0
+;;
+(info)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':provider:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_tmpmail__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:tmpmail-config-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':key:_default' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':key:_default' \
+':value:_default' \
+&& ret=0
+;;
+(unset)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':key:_default' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--peek[]' \
+'--html[]' \
+'--open[]' \
+'(--html --open)--raw[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':message:_default' \
+&& ret=0
+;;
+(latest)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--peek[]' \
+'--html[]' \
+'--open[]' \
+'(--html --open)--raw[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(new)
+_arguments "${_arguments_options[@]}" : \
+'--address=[]:ADDRESS:_default' \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::name:_default' \
+&& ret=0
+;;
+(new-mail)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--all-inboxes[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(unread)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--all-inboxes[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(inboxes)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(use)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(watch)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--all[]' \
+'--existing[]' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::names:_default' \
+&& ret=0
+;;
+(copy)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::name:_default' \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'--inbox=[]:INBOX:_default' \
+'--provider=[]:PROVIDER:_default' \
+'*--no-provider=[]:NO_PROVIDER:_default' \
+'--timeout=[]:TIMEOUT:_default' \
+'--json[]' \
+'--no-color[]' \
+'--quiet[]' \
+'--verbose[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_tmpmail_commands] )) ||
+_tmpmail_commands() {
+    local commands; commands=(
+'message:Work with messages' \
+'inbox:Work with named inboxes' \
+'attachment:Work with message attachments' \
+'provider:Inspect and configure providers' \
+'config:Inspect and update local configuration' \
+'ls:Alias for \`message list\`' \
+'read:Alias for \`message read\`' \
+'latest:Alias for \`message latest\`' \
+'new:Alias for \`inbox create\`' \
+'new-mail:Alias for \`message new\`' \
+'unread:Alias for \`message new\`' \
+'inboxes:Alias for \`inbox list\`' \
+'use:Alias for \`inbox use\`' \
+'watch:Alias for \`inbox watch\`' \
+'copy:Copy an inbox address' \
+'doctor:Diagnose local configuration' \
+    )
+    _describe -t commands 'tmpmail commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__attachment_commands] )) ||
+_tmpmail__subcmd__attachment_commands() {
+    local commands; commands=(
+'list:' \
+'save:' \
+    )
+    _describe -t commands 'tmpmail attachment commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__attachment__subcmd__list_commands] )) ||
+_tmpmail__subcmd__attachment__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail attachment list commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__attachment__subcmd__save_commands] )) ||
+_tmpmail__subcmd__attachment__subcmd__save_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail attachment save commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__config_commands] )) ||
+_tmpmail__subcmd__config_commands() {
+    local commands; commands=(
+'show:' \
+'get:' \
+'set:' \
+'unset:' \
+    )
+    _describe -t commands 'tmpmail config commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__config__subcmd__get_commands] )) ||
+_tmpmail__subcmd__config__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail config get commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__config__subcmd__set_commands] )) ||
+_tmpmail__subcmd__config__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail config set commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__config__subcmd__show_commands] )) ||
+_tmpmail__subcmd__config__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail config show commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__config__subcmd__unset_commands] )) ||
+_tmpmail__subcmd__config__subcmd__unset_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail config unset commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__copy_commands] )) ||
+_tmpmail__subcmd__copy_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail copy commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__doctor_commands] )) ||
+_tmpmail__subcmd__doctor_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail doctor commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox_commands] )) ||
+_tmpmail__subcmd__inbox_commands() {
+    local commands; commands=(
+'create:' \
+'list:' \
+'use:' \
+'remove:' \
+'watch:' \
+    )
+    _describe -t commands 'tmpmail inbox commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox__subcmd__create_commands] )) ||
+_tmpmail__subcmd__inbox__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inbox create commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox__subcmd__list_commands] )) ||
+_tmpmail__subcmd__inbox__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inbox list commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox__subcmd__remove_commands] )) ||
+_tmpmail__subcmd__inbox__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inbox remove commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox__subcmd__use_commands] )) ||
+_tmpmail__subcmd__inbox__subcmd__use_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inbox use commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inbox__subcmd__watch_commands] )) ||
+_tmpmail__subcmd__inbox__subcmd__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inbox watch commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__inboxes_commands] )) ||
+_tmpmail__subcmd__inboxes_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail inboxes commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__latest_commands] )) ||
+_tmpmail__subcmd__latest_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail latest commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__ls_commands] )) ||
+_tmpmail__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail ls commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message_commands] )) ||
+_tmpmail__subcmd__message_commands() {
+    local commands; commands=(
+'list:' \
+'read:' \
+'latest:' \
+'new:' \
+'ack:' \
+    )
+    _describe -t commands 'tmpmail message commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message__subcmd__ack_commands] )) ||
+_tmpmail__subcmd__message__subcmd__ack_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail message ack commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message__subcmd__latest_commands] )) ||
+_tmpmail__subcmd__message__subcmd__latest_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail message latest commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message__subcmd__list_commands] )) ||
+_tmpmail__subcmd__message__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail message list commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message__subcmd__new_commands] )) ||
+_tmpmail__subcmd__message__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail message new commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__message__subcmd__read_commands] )) ||
+_tmpmail__subcmd__message__subcmd__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail message read commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__new_commands] )) ||
+_tmpmail__subcmd__new_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail new commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__new-mail_commands] )) ||
+_tmpmail__subcmd__new-mail_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail new-mail commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__provider_commands] )) ||
+_tmpmail__subcmd__provider_commands() {
+    local commands; commands=(
+'list:' \
+'domains:' \
+'auth:' \
+'info:' \
+    )
+    _describe -t commands 'tmpmail provider commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__provider__subcmd__auth_commands] )) ||
+_tmpmail__subcmd__provider__subcmd__auth_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail provider auth commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__provider__subcmd__domains_commands] )) ||
+_tmpmail__subcmd__provider__subcmd__domains_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail provider domains commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__provider__subcmd__info_commands] )) ||
+_tmpmail__subcmd__provider__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail provider info commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__provider__subcmd__list_commands] )) ||
+_tmpmail__subcmd__provider__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail provider list commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__read_commands] )) ||
+_tmpmail__subcmd__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail read commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__unread_commands] )) ||
+_tmpmail__subcmd__unread_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail unread commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__use_commands] )) ||
+_tmpmail__subcmd__use_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail use commands' commands "$@"
+}
+(( $+functions[_tmpmail__subcmd__watch_commands] )) ||
+_tmpmail__subcmd__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'tmpmail watch commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_tmpmail" ]; then
+    _tmpmail "$@"
+else
+    compdef _tmpmail tmpmail
+fi
