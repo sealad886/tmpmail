@@ -27,6 +27,36 @@ fn server(bodies: Vec<&'static str>) -> (String, thread::JoinHandle<Vec<String>>
     (format!("http://{address}/graphql"), handle)
 }
 
+fn raw_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let address = listener.local_addr().expect("address");
+    let download_url = format!("http://{address}/download/mail-1");
+    let session = format!(
+        r#"{{"data":{{"session":{{"id":"session-1","expiresAt":"2026-08-14T00:20:00Z","mails":[{{"id":"mail-1","rawSize":5,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-08-14T00:01:00Z","text":"hello","html":null,"headerSubject":"Subject","downloadUrl":"{download_url}","attachments":[]}}]}}}}}}"#
+    );
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (content_type, body) in [
+            ("application/json", session),
+            ("message/rfc822", "hello".to_owned()),
+        ] {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut bytes = vec![0; 16 * 1024];
+            let count = stream.read(&mut bytes).expect("read");
+            requests.push(String::from_utf8_lossy(&bytes[..count]).into_owned());
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("respond");
+        }
+        requests
+    });
+    (format!("http://{address}/graphql"), handle)
+}
+
 fn credentials() -> DropMailCredentials {
     DropMailCredentials {
         token: "af_test-token-current".to_owned(),
@@ -51,6 +81,22 @@ fn debug_output_redacts_token_and_restore_key() {
     assert!(!rendered.contains("af_test-token-current"));
     assert!(!rendered.contains("restore-secret"));
     assert!(rendered.contains("[REDACTED]"));
+}
+
+#[test]
+fn serialized_inbox_credentials_do_not_duplicate_provider_token() {
+    let encoded = serde_json::to_string(&credentials()).expect("serialize");
+    assert!(!encoded.contains("af_test-token-current"));
+    assert!(!encoded.contains("\"token\""));
+}
+
+#[test]
+fn saved_inbox_credentials_bind_the_current_provider_token() {
+    let encoded = serde_json::to_vec(&credentials()).expect("serialize");
+    let mut restored: DropMailCredentials = serde_json::from_slice(&encoded).expect("restore");
+    assert!(restored.token.is_empty());
+    restored.bind_token("af_rotated-token-current");
+    assert_eq!(restored.token, "af_rotated-token-current");
 }
 
 #[tokio::test]
@@ -78,10 +124,34 @@ async fn parses_session_mail_and_updates_expiry() {
         .expect("provider");
     let mut credentials = credentials();
 
-    let messages = provider.messages(&mut credentials).await.expect("messages");
-    assert_eq!(messages[0].subject, "Subject");
+    let message = provider
+        .message(&mut credentials, "mail-1")
+        .await
+        .expect("message");
+    assert_eq!(message.subject, "Subject");
+    assert!(message.raw.is_empty());
     assert_eq!(credentials.expires_at, "2026-08-14T00:20:00Z");
-    handle.join().expect("server");
+    let requests = handle.join().expect("server");
+    assert!(!requests[0].contains(" raw "));
+}
+
+#[tokio::test]
+async fn fetches_raw_source_only_for_explicit_raw_reads() {
+    let (base, handle) = raw_server();
+    let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
+        .expect("provider");
+
+    let (message, response, size) = provider
+        .raw_response(&mut credentials(), "mail-1")
+        .await
+        .expect("raw message");
+    assert!(message.raw.is_empty());
+    assert_eq!(size, 5);
+    assert_eq!(response.text().await.expect("raw body"), "hello");
+    let requests = handle.join().expect("server");
+    assert!(!requests[0].contains(" raw "));
+    assert!(requests[0].contains("downloadUrl"));
+    assert!(requests[1].starts_with("GET /download/mail-1 "));
 }
 
 #[tokio::test]

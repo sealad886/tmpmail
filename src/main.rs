@@ -18,7 +18,7 @@ use tmpmail::providers::{
     enforce_creation_deadline, remaining_creation_time,
 };
 use tmpmail::render::{Attempt, Envelope, Meta, html_to_text, safe_html_document, terminal_text};
-use tmpmail::secrets::{KeyringSecretStore, SecretStore};
+use tmpmail::secrets::{KeyringSecretStore, SecretStore, unique_inbox_reference};
 use tmpmail::state::{AppState, StateStore};
 
 fn main() -> ExitCode {
@@ -36,7 +36,23 @@ fn main() -> ExitCode {
         let _ = writeln!(io::stdout().lock(), "tmpmail {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
-    let cli = Cli::parse();
+    let json_requested = std::env::args_os().any(|value| value == "--json");
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(parse_error) => {
+            if json_requested {
+                let error = AppError::usage(parse_error.to_string());
+                let envelope = Envelope::<serde_json::Value>::failure(&error, Meta::default());
+                println!(
+                    "{}",
+                    serde_json::to_string(&envelope).expect("JSON envelope")
+                );
+            } else {
+                let _ = parse_error.print();
+            }
+            return ExitCode::from(2);
+        }
+    };
     match cli.validate().and_then(|_| run(&cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -105,6 +121,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
             peek,
             html,
             open,
+            raw,
         } => run_async(
             cli,
             &paths,
@@ -113,6 +130,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 peek,
                 html,
                 open,
+                raw,
             },
         ),
         Action::MessageRead {
@@ -121,6 +139,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
             peek,
             html,
             open,
+            raw,
         } => run_async(
             cli,
             &paths,
@@ -130,6 +149,7 @@ fn run(cli: &Cli) -> Result<(), AppError> {
                 peek,
                 html,
                 open,
+                raw,
             },
         ),
         Action::MessageNew {
@@ -358,13 +378,24 @@ fn provider_auth(
     };
     DropMail::new(&token, effective_timeout(cli, paths)?)
         .map_err(|error| error.into_app_error())?;
+    let previous = KeyringSecretStore.get("provider:dropmail")?;
     KeyringSecretStore.put("provider:dropmail", token.as_bytes())?;
     let store = ConfigStore::at(&paths.config);
     if let Err(error) = store.update(|config| {
         config.providers.dropmail_ready = true;
         Ok(())
     }) {
-        let _ = KeyringSecretStore.remove("provider:dropmail");
+        let rollback = match previous {
+            Some(previous) => KeyringSecretStore.put("provider:dropmail", &previous),
+            None => KeyringSecretStore.remove("provider:dropmail"),
+        };
+        if rollback.is_err() {
+            return Err(AppError::new(
+                "partial_operation",
+                "DropMail authentication changed but configuration failed; verify credentials with doctor",
+                10,
+            ));
+        }
         return Err(error);
     }
     output(
@@ -388,6 +419,7 @@ enum NetworkAction {
         peek: bool,
         html: bool,
         open: bool,
+        raw: bool,
     },
     Read {
         message: String,
@@ -395,6 +427,7 @@ enum NetworkAction {
         peek: bool,
         html: bool,
         open: bool,
+        raw: bool,
     },
     New(Option<String>),
     Review(Option<String>),
@@ -483,30 +516,58 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                     .await
                     .map_err(|error| error.into_app_error())?,
             }
-            store.update(|state| state.remove(&name).map(|_| ()))?;
-            KeyringSecretStore.remove(&inbox.secret_ref)?;
+            if let Err(error) = store.update(|state| {
+                state
+                    .remove_matching(&name, inbox.provider, &inbox.secret_ref)
+                    .map(|_| ())
+            }) {
+                let _ = KeyringSecretStore.remove(&inbox.secret_ref);
+                return render_lifecycle_partial(
+                    cli,
+                    "inbox_remove",
+                    "remote inbox was removed but local state changed concurrently; any replacement was preserved",
+                    error,
+                );
+            }
+            if let Err(error) = KeyringSecretStore.remove(&inbox.secret_ref) {
+                return render_lifecycle_partial(
+                    cli,
+                    "inbox_remove",
+                    "remote inbox and local metadata were removed but credential cleanup failed",
+                    error,
+                );
+            }
             output(cli, json!({"removed": name}), format!("Removed {name}"))
         }
         NetworkAction::List(inbox) => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let messages = fetch_messages(&mailtm, &mut credentials, timeout).await?;
             persist_credentials(&selected.secret_ref, &credentials)?;
-            output_messages(cli, messages)
+            output_messages(cli, messages, Some(selected.provider))
         }
         NetworkAction::Latest {
             inbox,
             peek,
             html,
             open,
+            raw,
         } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let messages = fetch_messages(&mailtm, &mut credentials, timeout).await?;
             let newest = messages
                 .iter()
-                .max_by(|a, b| a.created_at.cmp(&b.created_at))
+                .max_by_key(|message| summary_key(message))
                 .ok_or_else(|| AppError::new("message_not_found", "inbox is empty", 8))?;
-            let message = fetch_message(&mailtm, &mut credentials, &newest.id, timeout).await?;
-            output_message(cli, paths, &selected.name, &message, html, open)?;
+            let message =
+                fetch_message(&mailtm, &mut credentials, &newest.id, timeout, raw).await?;
+            output_message(
+                cli,
+                paths,
+                &selected.name,
+                selected.provider,
+                &message,
+                MessageRenderOptions { html, open, raw },
+            )?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
                 save_acknowledgement(
@@ -524,11 +585,19 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             peek,
             html,
             open,
+            raw,
         } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
             let visible = fetch_messages(&mailtm, &mut credentials, timeout).await?;
-            let message = fetch_message(&mailtm, &mut credentials, &message, timeout).await?;
-            output_message(cli, paths, &selected.name, &message, html, open)?;
+            let message = fetch_message(&mailtm, &mut credentials, &message, timeout, raw).await?;
+            output_message(
+                cli,
+                paths,
+                &selected.name,
+                selected.provider,
+                &message,
+                MessageRenderOptions { html, open, raw },
+            )?;
             if !peek {
                 acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
                 save_acknowledgement(
@@ -546,12 +615,10 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             let messages = fetch_messages(&mailtm, &mut credentials, timeout)
                 .await?
                 .into_iter()
-                .filter(|message| {
-                    !message.seen && state.is_unseen(&selected.name, &summary_key(message))
-                })
+                .filter(|message| tmpmail::watch::locally_unseen(&state, &selected.name, message))
                 .collect();
             persist_credentials(&selected.secret_ref, &credentials)?;
-            output_messages(cli, messages)
+            output_messages(cli, messages, Some(selected.provider))
         }
         NetworkAction::Review(inbox) => {
             review_messages(cli, paths, &mailtm, timeout, inbox.as_deref()).await
@@ -604,7 +671,8 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
         }
         NetworkAction::Attachments { message, inbox } => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
-            let message = fetch_message(&mailtm, &mut credentials, &message, timeout).await?;
+            let message =
+                fetch_message(&mailtm, &mut credentials, &message, timeout, false).await?;
             persist_credentials(&selected.secret_ref, &credentials)?;
             let human = message
                 .attachments
@@ -612,7 +680,15 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 .map(|item| format!("{}\t{}\t{} bytes", item.id, item.filename, item.size))
                 .collect::<Vec<_>>()
                 .join("\n");
-            output(cli, json!({"attachments": message.attachments}), human)
+            output_with_meta(
+                cli,
+                json!({"attachments": message.attachments}),
+                human,
+                Meta {
+                    provider: Some(selected.provider),
+                    ..Meta::default()
+                },
+            )
         }
         NetworkAction::AttachmentSave {
             message,
@@ -891,7 +967,7 @@ async fn review_messages(
     let messages: Vec<_> = fetch_messages(mailtm, &mut credentials, timeout)
         .await?
         .into_iter()
-        .filter(|message| !message.seen && state.is_unseen(&selected.name, &summary_key(message)))
+        .filter(|message| tmpmail::watch::locally_unseen(&state, &selected.name, message))
         .collect();
     if messages.is_empty() {
         return output(cli, json!({"messages": []}), "No new messages.".to_owned());
@@ -910,9 +986,12 @@ async fn review_messages(
             .flush()
             .map_err(|e| AppError::state("review", e.to_string()))?;
         let mut input = String::new();
-        io::stdin()
+        let bytes = io::stdin()
             .read_line(&mut input)
             .map_err(|e| AppError::state("review", e.to_string()))?;
+        if bytes == 0 {
+            break;
+        }
         let trimmed = input.trim();
         if trimmed == "q" {
             break;
@@ -929,8 +1008,16 @@ async fn review_messages(
         };
         match action {
             "r" => {
-                let message = fetch_message(mailtm, &mut credentials, &summary.id, timeout).await?;
-                output_message(cli, paths, &selected.name, &message, false, false)?;
+                let message =
+                    fetch_message(mailtm, &mut credentials, &summary.id, timeout, false).await?;
+                output_message(
+                    cli,
+                    paths,
+                    &selected.name,
+                    selected.provider,
+                    &message,
+                    MessageRenderOptions::default(),
+                )?;
                 acknowledge_message(mailtm, &mut credentials, &message.id).await?;
                 save_acknowledgement(
                     paths,
@@ -1053,23 +1140,45 @@ async fn create_inbox(
         );
     };
     let fallback_used = attempts.len() > 1;
-    let (address_value, secret_ref, capabilities, serialized) = match &created {
+    let secret_ref = unique_inbox_reference(provider_id);
+    let (address_value, capabilities, serialized) = match &created {
         CreatedCredentials::MailTm(value) => (
             value.address.clone(),
-            format!("mailtm:{name}"),
             tmpmail::core::Capabilities::mailtm(),
             serde_json::to_vec(value),
         ),
         CreatedCredentials::DropMail(value) => (
             value.address.clone(),
-            format!("dropmail:{name}"),
             tmpmail::core::Capabilities::dropmail(),
             serde_json::to_vec(value),
         ),
     };
-    let serialized =
-        serialized.map_err(|error| AppError::state("credential_encode", error.to_string()))?;
-    KeyringSecretStore.put(&secret_ref, &serialized)?;
+    let serialized = match serialized {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            let error = AppError::state("credential_encode", error.to_string());
+            if cleanup_created(mailtm, timeout, &created).await.is_err() {
+                return render_lifecycle_partial(
+                    cli,
+                    "inbox_create",
+                    "credential encoding failed and the remote inbox may remain",
+                    error,
+                );
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = KeyringSecretStore.put(&secret_ref, &serialized) {
+        if cleanup_created(mailtm, timeout, &created).await.is_err() {
+            return render_lifecycle_partial(
+                cli,
+                "inbox_create",
+                "credential storage failed and the remote inbox may remain",
+                error,
+            );
+        }
+        return Err(error);
+    }
     let inbox = tmpmail::core::Inbox::new(
         &name,
         &address_value,
@@ -1087,8 +1196,16 @@ async fn create_inbox(
         }
         Ok(())
     }) {
-        cleanup_created(mailtm, timeout, &created).await;
-        let _ = KeyringSecretStore.remove(&secret_ref);
+        let cleanup = cleanup_created(mailtm, timeout, &created).await;
+        let secret_cleanup = KeyringSecretStore.remove(&secret_ref);
+        if cleanup.is_err() || secret_cleanup.is_err() {
+            return render_lifecycle_partial(
+                cli,
+                "inbox_create",
+                "local metadata failed and the remote inbox or temporary credential may remain",
+                error,
+            );
+        }
         return Err(error);
     }
     if fallback_used && !cli.quiet {
@@ -1187,17 +1304,49 @@ async fn cleanup_created(
     mailtm: &MailTm,
     timeout: std::time::Duration,
     created: &CreatedCredentials,
-) {
+) -> Result<(), AppError> {
     match created {
-        CreatedCredentials::MailTm(value) => {
-            let _ = mailtm.delete_account(&value.token, &value.account_id).await;
-        }
+        CreatedCredentials::MailTm(value) => mailtm
+            .delete_account(&value.token, &value.account_id)
+            .await
+            .map_err(|error| error.into_app_error()),
         CreatedCredentials::DropMail(value) => {
-            if let Ok(provider) = DropMail::new(&value.token, timeout) {
-                let _ = provider.delete_address(value).await;
-            }
+            let provider =
+                DropMail::new(&value.token, timeout).map_err(|error| error.into_app_error())?;
+            provider
+                .delete_address(value)
+                .await
+                .map_err(|error| error.into_app_error())
         }
     }
+}
+
+fn render_lifecycle_partial<T>(
+    cli: &Cli,
+    operation: &str,
+    detail: &str,
+    cause: AppError,
+) -> Result<T, AppError> {
+    let error = AppError::new("partial_operation", detail, 10);
+    if cli.json {
+        let mut envelope = Envelope::<serde_json::Value>::failure(&error, Meta::default());
+        envelope.data = Some(json!({
+            "operation": operation,
+            "attention_required": true,
+            "cause": {
+                "code": cause.code(),
+                "message": cause.to_string(),
+                "retryable": cause.retryable()
+            }
+        }));
+        println!(
+            "{}",
+            serde_json::to_string(&envelope).expect("JSON envelope")
+        );
+    } else {
+        eprintln!("{detail}: {cause}");
+    }
+    Err(error.silent())
 }
 
 fn provider_reason(failure: &ProviderFailure) -> &'static str {
@@ -1248,9 +1397,12 @@ fn load_credentials(inbox: &tmpmail::core::Inbox) -> Result<ProviderCredentials,
         ProviderId::MailTm => serde_json::from_slice(&bytes)
             .map(ProviderCredentials::MailTm)
             .map_err(|_| invalid_credentials()),
-        ProviderId::DropMail => serde_json::from_slice(&bytes)
-            .map(ProviderCredentials::DropMail)
-            .map_err(|_| invalid_credentials()),
+        ProviderId::DropMail => {
+            let mut credentials: DropMailCredentials =
+                serde_json::from_slice(&bytes).map_err(|_| invalid_credentials())?;
+            credentials.bind_token(load_dropmail_token()?);
+            Ok(ProviderCredentials::DropMail(credentials))
+        }
     }
 }
 
@@ -1294,17 +1446,73 @@ async fn fetch_message(
     credentials: &mut ProviderCredentials,
     id: &str,
     timeout: std::time::Duration,
+    raw: bool,
 ) -> Result<Message, AppError> {
     match credentials {
-        ProviderCredentials::MailTm(value) => mailtm
-            .message_with_refresh(value, id)
-            .await
-            .map_err(|error| error.into_app_error()),
-        ProviderCredentials::DropMail(value) => DropMail::new(&value.token, timeout)
-            .map_err(|error| error.into_app_error())?
-            .message(value, id)
-            .await
-            .map_err(|error| error.into_app_error()),
+        ProviderCredentials::MailTm(value) => {
+            let mut message = mailtm
+                .message_with_refresh(value, id)
+                .await
+                .map_err(|error| error.into_app_error())?;
+            if raw {
+                message.raw = mailtm
+                    .source_with_refresh(value, id)
+                    .await
+                    .map_err(|error| error.into_app_error())?;
+            }
+            Ok(message)
+        }
+        ProviderCredentials::DropMail(value) => {
+            let provider =
+                DropMail::new(&value.token, timeout).map_err(|error| error.into_app_error())?;
+            if raw {
+                let (mut message, response, advertised_size) = provider
+                    .raw_response(value, id)
+                    .await
+                    .map_err(|error| error.into_app_error())?;
+                let limit = 25 * 1024 * 1024_u64;
+                if advertised_size > limit
+                    || response.content_length().is_some_and(|size| size > limit)
+                {
+                    return Err(AppError::new(
+                        "message_too_large",
+                        "raw message exceeds the 25 MiB safety limit",
+                        9,
+                    ));
+                }
+                let mut bytes = Vec::with_capacity(advertised_size.min(limit) as usize);
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|_| {
+                        AppError::new(
+                            "message_download",
+                            "raw message download was interrupted",
+                            5,
+                        )
+                    })?;
+                    if bytes.len().saturating_add(chunk.len()) > limit as usize {
+                        return Err(AppError::new(
+                            "message_too_large",
+                            "raw message exceeds the 25 MiB safety limit",
+                            9,
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                if advertised_size != 0 && bytes.len() as u64 != advertised_size {
+                    return Err(AppError::new(
+                        "message_truncated",
+                        "raw message size did not match provider metadata",
+                        5,
+                    ));
+                }
+                message.raw = String::from_utf8_lossy(&bytes).into_owned();
+                return Ok(message);
+            } else {
+                provider.message(value, id).await
+            }
+            .map_err(|error| error.into_app_error())
+        }
     }
 }
 
@@ -1385,7 +1593,7 @@ async fn save_attachment(
     request: AttachmentSaveRequest,
 ) -> Result<(), AppError> {
     let (selected, mut credentials) = selected_credentials(paths, request.inbox.as_deref())?;
-    let message = fetch_message(mailtm, &mut credentials, &request.message, timeout).await?;
+    let message = fetch_message(mailtm, &mut credentials, &request.message, timeout, false).await?;
     let attachment = message
         .attachments
         .iter()
@@ -1529,9 +1737,10 @@ async fn new_all_inboxes(
         match result {
             Ok((inbox, credentials, messages)) => {
                 persist_credentials(&inbox.secret_ref, &credentials)?;
-                for message in messages.into_iter().filter(|message| {
-                    !message.seen && state.is_unseen(&inbox.name, &summary_key(message))
-                }) {
+                for message in messages
+                    .into_iter()
+                    .filter(|message| tmpmail::watch::locally_unseen(&state, &inbox.name, message))
+                {
                     human.push(format!(
                         "{}\t{}\t{}\t{}",
                         inbox.name, message.id, message.from.address, message.subject
@@ -1574,7 +1783,7 @@ async fn new_all_inboxes(
             );
         }
         if !human.is_empty() {
-            println!("{}", human.join("\n"));
+            println!("{}", terminal_text(&human.join("\n")));
         }
         return Err(AppError::new(
             "partial_operation",
@@ -1638,7 +1847,11 @@ fn random_password() -> String {
     Alphanumeric.sample_string(&mut rand::rng(), 32)
 }
 
-fn output_messages(cli: &Cli, messages: Vec<MessageSummary>) -> Result<(), AppError> {
+fn output_messages(
+    cli: &Cli,
+    messages: Vec<MessageSummary>,
+    provider: Option<ProviderId>,
+) -> Result<(), AppError> {
     let human = if messages.is_empty() {
         "No messages.".to_owned()
     } else {
@@ -1656,30 +1869,60 @@ fn output_messages(cli: &Cli, messages: Vec<MessageSummary>) -> Result<(), AppEr
             .collect::<Vec<_>>()
             .join("\n")
     };
-    output(cli, json!({"messages": messages}), human)
+    output_with_meta(
+        cli,
+        json!({"messages": messages}),
+        human,
+        Meta {
+            provider,
+            ..Meta::default()
+        },
+    )
+}
+
+#[derive(Default)]
+struct MessageRenderOptions {
+    html: bool,
+    open: bool,
+    raw: bool,
 }
 
 fn output_message(
     cli: &Cli,
     paths: &AppPaths,
     inbox: &str,
+    provider: ProviderId,
     message: &Message,
-    html: bool,
-    open: bool,
+    options: MessageRenderOptions,
 ) -> Result<(), AppError> {
-    let body = if message.text.trim().is_empty() {
+    let MessageRenderOptions { html, open, raw } = options;
+    let body = if raw {
+        terminal_text(&message.raw)
+    } else if message.text.trim().is_empty() {
         html_to_text(&message.html.join("\n"))
     } else {
         terminal_text(&message.text)
     };
-    let human = format!(
-        "From: {}\nSubject: {}\nDate: {}\n\n{}",
-        terminal_text(&message.from.address),
-        terminal_text(&message.subject),
-        terminal_text(&message.created_at),
-        body
-    );
-    output(cli, json!({"message": message}), human)?;
+    let human = if raw {
+        body.clone()
+    } else {
+        format!(
+            "From: {}\nSubject: {}\nDate: {}\n\n{}",
+            terminal_text(&message.from.address),
+            terminal_text(&message.subject),
+            terminal_text(&message.created_at),
+            body
+        )
+    };
+    output_with_meta(
+        cli,
+        json!({"message": message}),
+        human,
+        Meta {
+            provider: Some(provider),
+            ..Meta::default()
+        },
+    )?;
     if html {
         let directory = paths.cache.join("messages");
         fs::create_dir_all(&directory).map_err(|e| AppError::state("html_cache", e.to_string()))?;
@@ -1689,7 +1932,7 @@ fn output_message(
             safe_basename(&message.id)?
         ));
         atomic_write(&path, safe_html_document(&body).as_bytes(), true)?;
-        if open {
+        if open || ConfigStore::at(&paths.config).load()?.browser {
             tmpmail::platform::open_browser(&path)?;
         }
     }
@@ -1727,7 +1970,9 @@ fn output_inboxes(cli: &Cli, state: &AppState) -> Result<(), AppError> {
         };
         println!(
             "{marker} {:<16} {:<10} {}",
-            inbox.name, inbox.provider, inbox.address
+            terminal_text(&inbox.name),
+            inbox.provider,
+            terminal_text(&inbox.address)
         );
     }
     Ok(())
@@ -1797,7 +2042,7 @@ fn output_with_meta(
             serde_json::to_string(&envelope).expect("JSON envelope")
         );
     } else if !cli.quiet {
-        println!("{human}");
+        println!("{}", terminal_text(&human));
     }
     Ok(())
 }

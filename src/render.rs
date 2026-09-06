@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderId>,
     pub fallback_used: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub attempts: Vec<Attempt>,
 }
 

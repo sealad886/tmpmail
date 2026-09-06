@@ -75,18 +75,26 @@ impl Cli {
                 peek,
                 html,
                 open,
+                raw,
             }) => Action::MessageRead {
                 message: message.clone(),
                 inbox: self.inbox.clone(),
                 peek: *peek,
                 html: *html,
                 open: *open,
+                raw: *raw,
             },
-            Some(Command::Latest { peek, html, open }) => Action::MessageLatest {
+            Some(Command::Latest {
+                peek,
+                html,
+                open,
+                raw,
+            }) => Action::MessageLatest {
                 inbox: self.inbox.clone(),
                 peek: *peek,
                 html: *html,
                 open: *open,
+                raw: *raw,
             },
             Some(Command::NewMail { all_inboxes }) | Some(Command::Unread { all_inboxes }) => {
                 Action::MessageNew {
@@ -169,18 +177,26 @@ fn message_action(command: &MessageCommand, inbox: Option<String>) -> Action {
             peek,
             html,
             open,
+            raw,
         } => Action::MessageRead {
             message: message.clone(),
             inbox,
             peek: *peek,
             html: *html,
             open: *open,
+            raw: *raw,
         },
-        MessageCommand::Latest { peek, html, open } => Action::MessageLatest {
+        MessageCommand::Latest {
+            peek,
+            html,
+            open,
+            raw,
+        } => Action::MessageLatest {
             inbox,
             peek: *peek,
             html: *html,
             open: *open,
+            raw: *raw,
         },
         MessageCommand::New {
             all_inboxes,
@@ -257,6 +273,8 @@ enum Command {
         html: bool,
         #[arg(long, requires = "html")]
         open: bool,
+        #[arg(long, conflicts_with_all = ["html", "open"])]
+        raw: bool,
     },
     /// Alias for `message latest`
     Latest {
@@ -266,6 +284,8 @@ enum Command {
         html: bool,
         #[arg(long, requires = "html")]
         open: bool,
+        #[arg(long, conflicts_with_all = ["html", "open"])]
+        raw: bool,
     },
     /// Alias for `inbox create`
     New {
@@ -312,6 +332,8 @@ enum MessageCommand {
         html: bool,
         #[arg(long, requires = "html")]
         open: bool,
+        #[arg(long, conflicts_with_all = ["html", "open"])]
+        raw: bool,
     },
     Latest {
         #[arg(long)]
@@ -320,6 +342,8 @@ enum MessageCommand {
         html: bool,
         #[arg(long, requires = "html")]
         open: bool,
+        #[arg(long, conflicts_with_all = ["html", "open"])]
+        raw: bool,
     },
     New {
         #[arg(long)]
@@ -328,6 +352,7 @@ enum MessageCommand {
         review: bool,
     },
     Ack {
+        #[arg(required = true, num_args = 1..)]
         messages: Vec<String>,
     },
 }
@@ -403,12 +428,14 @@ pub enum Action {
         peek: bool,
         html: bool,
         open: bool,
+        raw: bool,
     },
     MessageLatest {
         inbox: Option<String>,
         peek: bool,
         html: bool,
         open: bool,
+        raw: bool,
     },
     MessageNew {
         inbox: Option<String>,

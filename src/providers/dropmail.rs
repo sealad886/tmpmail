@@ -9,6 +9,7 @@ const DEFAULT_BASE_URL: &str = "https://dropmail.me/api/graphql";
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DropMailCredentials {
+    #[serde(default, skip_serializing)]
     pub token: String,
     pub session_id: String,
     pub address_id: String,
@@ -28,6 +29,12 @@ impl std::fmt::Debug for DropMailCredentials {
             .field("restore_key", &"[REDACTED]")
             .field("expires_at", &self.expires_at)
             .finish()
+    }
+}
+
+impl DropMailCredentials {
+    pub fn bind_token(&mut self, token: impl Into<String>) {
+        self.token = token.into();
     }
 }
 
@@ -165,6 +172,23 @@ impl DropMail {
             .find(|mail| mail.id == id)
             .map(full_message)
             .ok_or_else(|| error(ProviderFailure::NotFound, "DropMail message not found"))
+    }
+
+    pub async fn raw_response(
+        &self,
+        credentials: &mut DropMailCredentials,
+        id: &str,
+    ) -> Result<(Message, Response, u64), ProviderError> {
+        let session = self.session_with_restore(credentials).await?;
+        credentials.expires_at = session.expires_at;
+        let mail = session
+            .mails
+            .into_iter()
+            .find(|mail| mail.id == id)
+            .ok_or_else(|| error(ProviderFailure::NotFound, "DropMail message not found"))?;
+        let response = self.attachment(&mail.download_url).await?;
+        let size = mail.raw_size;
+        Ok((full_message(mail), response, size))
     }
 
     pub async fn delete_address(
@@ -418,6 +442,7 @@ fn full_message(mail: MailResource) -> Message {
         subject: mail.header_subject.unwrap_or_default(),
         text: mail.text.unwrap_or_default(),
         html: mail.html.into_iter().collect(),
+        raw: String::new(),
         seen: false,
         attachments: mail.attachments.into_iter().map(Into::into).collect(),
         created_at: mail.received_at,
@@ -496,7 +521,6 @@ struct MailResource {
     html: Option<String>,
     #[serde(default, rename = "headerSubject")]
     header_subject: Option<String>,
-    #[allow(dead_code)]
     #[serde(default, rename = "downloadUrl")]
     download_url: String,
     #[serde(default)]

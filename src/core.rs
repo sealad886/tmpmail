@@ -129,6 +129,8 @@ pub struct Acknowledgements {
 
 impl Acknowledgements {
     pub fn acknowledge(&mut self, key: MessageKey, visible: impl IntoIterator<Item = MessageKey>) {
+        let visible: BTreeSet<_> = visible.into_iter().collect();
+        self.gaps.retain(|gap| visible.contains(gap));
         if self.high_water.as_ref().is_some_and(|high| key <= *high) {
             self.gaps.remove(&key);
             return;

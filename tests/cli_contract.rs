@@ -25,6 +25,11 @@ fn read_and_latest_aliases_match_canonical_commands() {
         action(&["tmpmail", "latest"]),
         action(&["tmpmail", "message", "latest"])
     );
+    assert_eq!(
+        action(&["tmpmail", "read", "abc", "--raw"]),
+        action(&["tmpmail", "message", "read", "abc", "--raw"])
+    );
+    assert!(Cli::try_parse_from(["tmpmail", "read", "abc", "--raw", "--html"]).is_err());
 }
 
 #[test]
@@ -59,4 +64,9 @@ fn review_rejects_all_inboxes_mode() {
         .validate()
         .expect_err("modes conflict");
     assert_eq!(error.code(), "usage");
+}
+
+#[test]
+fn acknowledgement_requires_at_least_one_message() {
+    assert!(Cli::try_parse_from(["tmpmail", "message", "ack"]).is_err());
 }

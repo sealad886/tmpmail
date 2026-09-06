@@ -16,11 +16,14 @@ Create an inbox. This is an alias for inbox create.
 .B tmpmail [message list]
 List messages in the active or selected inbox.
 .TP
-.B tmpmail read MESSAGE [--peek] [--html [--open]]
+.B tmpmail read MESSAGE [--peek] [--html [--open] | --raw]
 Render one message. Successful output acknowledges it unless --peek is used.
 .TP
 .B tmpmail latest
 Render exactly the newest message in one inbox.
+.TP
+.B --raw
+Render sanitized MIME source for read/latest operations.
 .TP
 .B tmpmail message new [--all-inboxes] [--review]
 List every locally unseen message without acknowledging it.

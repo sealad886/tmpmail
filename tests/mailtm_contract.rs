@@ -53,6 +53,31 @@ async fn discovers_only_active_domains() {
 }
 
 #[tokio::test]
+async fn follows_bounded_same_origin_collection_pagination() {
+    let (base, handle) = server(vec![
+        Reply {
+            status: "200 OK",
+            content_type: "application/ld+json",
+            body: r#"{"hydra:member":[{"domain":"one.test","isActive":true}],"hydra:view":{"hydra:next":"/domains?page=2"}}"#,
+        },
+        Reply {
+            status: "200 OK",
+            content_type: "application/ld+json",
+            body: r#"{"hydra:member":[{"domain":"two.test","isActive":true}]}"#,
+        },
+    ]);
+    let provider = MailTm::with_base_url(base, Duration::from_secs(2)).expect("provider");
+
+    assert_eq!(
+        provider.domains().await.expect("paginated domains"),
+        ["one.test", "two.test"]
+    );
+    let requests = handle.join().expect("server");
+    assert!(requests[0].starts_with("GET /domains "));
+    assert!(requests[1].starts_with("GET /domains?page=2 "));
+}
+
+#[tokio::test]
 async fn creates_account_then_authenticates_without_leaking_credentials() {
     let (base, handle) = server(vec![
         Reply {
@@ -93,6 +118,11 @@ async fn parses_message_list_and_full_message() {
             content_type: "application/ld+json",
             body: r#"{"id":"m1","from":{"name":"Sender","address":"sender@example.test"},"subject":"Hello","text":"Body","html":["<p>Body</p>"],"seen":false,"attachments":[{"id":"a1","filename":"note.txt","contentType":"text/plain","size":4,"downloadUrl":"/messages/m1/attachment/a1"}],"createdAt":"2026-08-14T00:00:00Z"}"#,
         },
+        Reply {
+            status: "200 OK",
+            content_type: "application/ld+json",
+            body: r#"{"id":"m1","downloadUrl":"/sources/m1","data":"From: sender@example.test\r\n\r\nBody"}"#,
+        },
     ]);
     let provider = MailTm::with_base_url(base, Duration::from_secs(2)).expect("provider");
 
@@ -102,6 +132,13 @@ async fn parses_message_list_and_full_message() {
     let message = provider.message("token", "m1").await.expect("message");
     assert_eq!(message.text, "Body");
     assert_eq!(message.attachments[0].filename, "note.txt");
+    assert!(
+        provider
+            .source("token", "m1")
+            .await
+            .expect("source")
+            .starts_with("From: sender@example.test")
+    );
     handle.join().expect("server");
 }
 

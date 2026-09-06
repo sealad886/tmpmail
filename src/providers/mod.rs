@@ -46,6 +46,8 @@ pub struct Message {
     pub subject: String,
     pub text: String,
     pub html: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw: String,
     pub seen: bool,
     pub attachments: Vec<Attachment>,
     pub created_at: String,

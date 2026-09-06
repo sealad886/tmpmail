@@ -30,6 +30,7 @@ impl std::fmt::Debug for MailTmCredentials {
 pub struct MailTm {
     client: Client,
     base_url: String,
+    timeout: Duration,
 }
 
 impl MailTm {
@@ -54,19 +55,19 @@ impl MailTm {
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_owned(),
+            timeout,
         })
     }
 
     pub async fn domains(&self) -> Result<Vec<String>, ProviderError> {
-        let response: Collection<DomainResource> = self
-            .json(self.client.get(self.url("/domains")).send().await)
-            .await?;
-        Ok(response
-            .members
-            .into_iter()
-            .filter(|domain| domain.is_active)
-            .map(|domain| domain.domain)
-            .collect())
+        tokio::time::timeout(self.timeout, self.domains_paginated())
+            .await
+            .unwrap_or_else(|_| {
+                Err(ProviderError::new(
+                    ProviderFailure::Timeout,
+                    "Mail.tm domain discovery timed out",
+                ))
+            })
     }
 
     pub async fn create(
@@ -134,16 +135,14 @@ impl MailTm {
     }
 
     pub async fn messages(&self, token: &str) -> Result<Vec<MessageSummary>, ProviderError> {
-        let response: Collection<MessageListResource> = self
-            .json(
-                self.client
-                    .get(self.url("/messages"))
-                    .bearer_auth(token)
-                    .send()
-                    .await,
-            )
-            .await?;
-        Ok(response.members.into_iter().map(Into::into).collect())
+        tokio::time::timeout(self.timeout, self.messages_paginated(token))
+            .await
+            .unwrap_or_else(|_| {
+                Err(ProviderError::new(
+                    ProviderFailure::Timeout,
+                    "Mail.tm message listing timed out",
+                ))
+            })
     }
 
     pub async fn messages_with_refresh(
@@ -170,6 +169,33 @@ impl MailTm {
             )
             .await?;
         Ok(response.into())
+    }
+
+    pub async fn source(&self, token: &str, id: &str) -> Result<String, ProviderError> {
+        let response: SourceResource = self
+            .json(
+                self.client
+                    .get(self.url(&format!("/sources/{id}")))
+                    .bearer_auth(token)
+                    .send()
+                    .await,
+            )
+            .await?;
+        Ok(response.data)
+    }
+
+    pub async fn source_with_refresh(
+        &self,
+        credentials: &mut MailTmCredentials,
+        id: &str,
+    ) -> Result<String, ProviderError> {
+        match self.source(&credentials.token, id).await {
+            Err(error) if error.failure == ProviderFailure::Authentication => {
+                self.refresh(credentials).await?;
+                self.source(&credentials.token, id).await
+            }
+            result => result,
+        }
     }
 
     pub async fn message_with_refresh(
@@ -255,6 +281,71 @@ impl MailTm {
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
+    }
+
+    async fn domains_paginated(&self) -> Result<Vec<String>, ProviderError> {
+        let mut url = self.url("/domains");
+        let mut domains = Vec::new();
+        for _ in 0..100 {
+            let response: Collection<DomainResource> =
+                self.json(self.client.get(&url).send().await).await?;
+            domains.extend(
+                response
+                    .members
+                    .into_iter()
+                    .filter(|domain| domain.is_active)
+                    .map(|domain| domain.domain),
+            );
+            let Some(next) = response.view.and_then(|view| view.next) else {
+                return Ok(domains);
+            };
+            url = self.safe_page_url(&next)?;
+        }
+        Err(ProviderError::new(
+            ProviderFailure::InvalidResponse,
+            "Mail.tm pagination exceeded the safety limit",
+        ))
+    }
+
+    async fn messages_paginated(&self, token: &str) -> Result<Vec<MessageSummary>, ProviderError> {
+        let mut url = self.url("/messages");
+        let mut messages = Vec::new();
+        for _ in 0..100 {
+            let response: Collection<MessageListResource> = self
+                .json(self.client.get(&url).bearer_auth(token).send().await)
+                .await?;
+            messages.extend(response.members.into_iter().map(Into::into));
+            let Some(next) = response.view.and_then(|view| view.next) else {
+                return Ok(messages);
+            };
+            url = self.safe_page_url(&next)?;
+        }
+        Err(ProviderError::new(
+            ProviderFailure::InvalidResponse,
+            "Mail.tm pagination exceeded the safety limit",
+        ))
+    }
+
+    fn safe_page_url(&self, next: &str) -> Result<String, ProviderError> {
+        let base = reqwest::Url::parse(&self.base_url).map_err(|_| {
+            ProviderError::new(ProviderFailure::InvalidResponse, "invalid Mail.tm base URL")
+        })?;
+        let candidate = base.join(next).map_err(|_| {
+            ProviderError::new(
+                ProviderFailure::InvalidResponse,
+                "Mail.tm returned an invalid pagination URL",
+            )
+        })?;
+        if base.scheme() != candidate.scheme()
+            || base.host_str() != candidate.host_str()
+            || base.port_or_known_default() != candidate.port_or_known_default()
+        {
+            return Err(ProviderError::new(
+                ProviderFailure::InvalidResponse,
+                "Mail.tm returned an unsafe pagination URL",
+            ));
+        }
+        Ok(candidate.to_string())
     }
 
     async fn json<T: DeserializeOwned>(
@@ -359,6 +450,14 @@ struct AccountResource {
 struct Collection<T> {
     #[serde(rename = "hydra:member")]
     members: Vec<T>,
+    #[serde(rename = "hydra:view", default)]
+    view: Option<CollectionView>,
+}
+
+#[derive(Deserialize)]
+struct CollectionView {
+    #[serde(rename = "hydra:next", default)]
+    next: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -414,6 +513,11 @@ struct MessageResource {
 }
 
 #[derive(Deserialize)]
+struct SourceResource {
+    data: String,
+}
+
+#[derive(Deserialize)]
 struct AttachmentResource {
     id: String,
     filename: String,
@@ -444,6 +548,7 @@ impl From<MessageResource> for Message {
             subject: value.subject,
             text: value.text,
             html: value.html,
+            raw: String::new(),
             seen: value.seen,
             attachments: value.attachments.into_iter().map(Into::into).collect(),
             created_at: value.created_at,

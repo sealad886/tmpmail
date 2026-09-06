@@ -5,6 +5,10 @@ use crate::providers::MessageSummary;
 use crate::state::AppState;
 use std::time::Duration;
 
+pub fn locally_unseen(state: &AppState, inbox: &str, message: &MessageSummary) -> bool {
+    state.is_unseen(inbox, &key(message))
+}
+
 pub fn select_inboxes(
     state: &AppState,
     names: &[String],

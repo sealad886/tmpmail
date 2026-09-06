@@ -3,8 +3,8 @@ use tmpmail::core::{Capabilities, Inbox, MessageKey, ProviderId};
 use tmpmail::providers::{Address, MessageSummary};
 use tmpmail::state::AppState;
 use tmpmail::watch::{
-    establish_baseline, messages_after, newest_cursor, retry_delay, retry_delay_with_jitter,
-    select_inboxes,
+    establish_baseline, locally_unseen, messages_after, newest_cursor, retry_delay,
+    retry_delay_with_jitter, select_inboxes,
 };
 
 fn message(id: &str, created_at: &str) -> MessageSummary {
@@ -21,6 +21,14 @@ fn message(id: &str, created_at: &str) -> MessageSummary {
         size: 1,
         created_at: created_at.to_owned(),
     }
+}
+
+#[test]
+fn provider_seen_flag_does_not_override_local_unseen_state() {
+    let state = AppState::default();
+    let mut externally_seen = message("message", "1");
+    externally_seen.seen = true;
+    assert!(locally_unseen(&state, "inbox", &externally_seen));
 }
 
 #[test]

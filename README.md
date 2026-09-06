@@ -47,6 +47,8 @@ tmpmail config set inbox.work.watch true
 message new` returns all locally unseen messages. Reading acknowledges only
 after output succeeds; `--peek` never acknowledges. Review mode accepts `r`,
 `a`, `s`, and `q` actions followed by a message number where applicable.
+Use `tmpmail read MESSAGE --raw` when MIME source is needed; terminal controls
+remain stripped in human output and JSON remains structurally escaped.
 
 ## Providers and fallback
 
@@ -71,6 +73,8 @@ Message content is untrusted. Terminal output strips control and bidi-override
 characters. Plain text is preferred; HTML-only messages are converted to text
 in-process. `read --html` writes an inert escaped representation to the cache;
 `--html --open` explicitly opens it in the platform browser.
+Setting `config set browser true` makes future `--html` reads open the cached
+document through the platform browser without shell interpolation.
 
 ```console
 tmpmail attachment list MESSAGE

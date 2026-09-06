@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use fs2::FileExt;
+use rand::distr::{Alphanumeric, SampleString};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -10,6 +11,11 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, AppError>;
     fn put(&self, reference: &str, secret: &[u8]) -> Result<(), AppError>;
     fn remove(&self, reference: &str) -> Result<(), AppError>;
+}
+
+pub fn unique_inbox_reference(provider: crate::core::ProviderId) -> String {
+    let nonce = Alphanumeric.sample_string(&mut rand::rng(), 24);
+    format!("inbox:{provider}:{nonce}")
 }
 
 #[derive(Debug, Default)]
@@ -236,9 +242,30 @@ fn fallback_put(
     secret: &[u8],
     native: Result<(), AppError>,
 ) -> Result<(), AppError> {
+    let fallback = fallback_store();
+    fallback_put_to(reference, secret, native, fallback.as_ref())
+}
+
+fn fallback_put_to(
+    reference: &str,
+    secret: &[u8],
+    native: Result<(), AppError>,
+    fallback: Option<&ProtectedFileSecretStore>,
+) -> Result<(), AppError> {
     match native {
-        Ok(()) => Ok(()),
-        Err(error) => fallback_store().map_or(Err(error), |store| store.put(reference, secret)),
+        Ok(()) => {
+            if let Some(store) = fallback {
+                store.remove(reference).map_err(|_| {
+                    AppError::new(
+                        "partial_operation",
+                        "credential changed in the OS store but stale protected-file cleanup failed",
+                        10,
+                    )
+                })?;
+            }
+            Ok(())
+        }
+        Err(error) => fallback.map_or(Err(error), |store| store.put(reference, secret)),
     }
 }
 
@@ -246,7 +273,13 @@ fn fallback_remove(reference: &str, native: Result<(), AppError>) -> Result<(), 
     match native {
         Ok(()) => {
             if let Some(store) = fallback_store() {
-                store.remove(reference)?;
+                store.remove(reference).map_err(|_| {
+                    AppError::new(
+                        "partial_operation",
+                        "credential was removed from the OS store but protected-file cleanup failed",
+                        10,
+                    )
+                })?;
             }
             Ok(())
         }
@@ -256,6 +289,32 @@ fn fallback_remove(reference: &str, native: Result<(), AppError>) -> Result<(), 
 
 fn secret_file_error() -> AppError {
     AppError::new("secret_file", "protected secret file operation failed", 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_rotation_removes_stale_file_fallback() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let store = ProtectedFileSecretStore::at(temp.path().join("secrets.json"));
+        store.put("token", b"old").expect("old fallback");
+        fallback_put_to("token", b"new", Ok(()), Some(&store)).expect("native rotation");
+        assert_eq!(store.get("token").expect("fallback read"), None);
+    }
+
+    #[test]
+    fn native_rotation_reports_partial_state_when_fallback_cleanup_fails() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let directory = temp.path().join("secrets.json");
+        std::fs::create_dir(&directory).expect("blocking directory");
+        let store = ProtectedFileSecretStore::at(directory);
+        let error =
+            fallback_put_to("token", b"new", Ok(()), Some(&store)).expect_err("cleanup must fail");
+        assert_eq!(error.code(), "partial_operation");
+        assert_eq!(error.exit_code(), 10);
+    }
 }
 
 #[cfg(not(feature = "native-keyring"))]

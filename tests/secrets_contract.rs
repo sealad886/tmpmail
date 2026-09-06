@@ -1,5 +1,6 @@
 use tempfile::TempDir;
 use tmpmail::secrets::{ProtectedFileSecretStore, SecretStore};
+use tmpmail::{core::ProviderId, secrets::unique_inbox_reference};
 
 #[test]
 fn protected_file_round_trips_without_plaintext_reference_leaks() {
@@ -25,6 +26,14 @@ fn protected_file_round_trips_without_plaintext_reference_leaks() {
             0
         );
     }
+}
+
+#[test]
+fn concurrent_creation_attempts_receive_distinct_secret_references() {
+    let first = unique_inbox_reference(ProviderId::MailTm);
+    let second = unique_inbox_reference(ProviderId::MailTm);
+    assert_ne!(first, second);
+    assert!(first.starts_with("inbox:mailtm:"));
 }
 
 #[test]

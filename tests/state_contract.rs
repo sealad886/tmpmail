@@ -24,6 +24,26 @@ fn state_round_trips_and_preserves_active_inbox() {
 }
 
 #[test]
+fn conditional_remove_preserves_a_same_name_replacement() {
+    let mut state = AppState::default();
+    state.insert(Inbox::new(
+        "same",
+        "replacement@example.test",
+        ProviderId::MailTm,
+        "secret:new",
+        Capabilities::mailtm(),
+    ));
+
+    let error = state
+        .remove_matching("same", ProviderId::MailTm, "secret:old")
+        .expect_err("replacement identity must not be removed");
+
+    assert_eq!(error.code(), "state_conflict");
+    assert_eq!(error.exit_code(), 10);
+    assert_eq!(state.inboxes["same"].secret_ref, "secret:new");
+}
+
+#[test]
 fn corrupt_state_is_reported_instead_of_replaced() {
     let temp = TempDir::new().expect("tempdir");
     let path = temp.path().join("state.json");
@@ -55,6 +75,23 @@ fn acknowledgement_high_water_preserves_skipped_older_messages() {
     acknowledgements.acknowledge(key("1", "one"), visible);
     assert!(!acknowledgements.is_unseen(&key("1", "one")));
     assert!(acknowledgements.is_unseen(&key("2", "two")));
+}
+
+#[test]
+fn acknowledgement_gap_set_is_bounded_to_current_provider_visibility() {
+    let mut acknowledgements = tmpmail::core::Acknowledgements::default();
+    for page in 1..=200 {
+        let older = MessageKey {
+            created_at: format!("{page:04}-a"),
+            id: format!("older-{page}"),
+        };
+        let newer = MessageKey {
+            created_at: format!("{page:04}-b"),
+            id: format!("newer-{page}"),
+        };
+        acknowledgements.acknowledge(newer.clone(), [older, newer]);
+        assert!(acknowledgements.gaps.len() <= 1);
+    }
 }
 
 #[test]
@@ -117,6 +154,46 @@ fn concurrent_updates_do_not_lose_inbox_mutations() {
             .len(),
         16
     );
+}
+
+#[test]
+fn migration_and_concurrent_updates_share_one_locked_transaction() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("state.json");
+    std::fs::write(
+        &path,
+        br#"{"schema_version":1,"active_inbox":null,"inboxes":{},"acknowledgements":{}}"#,
+    )
+    .expect("legacy fixture");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut threads = Vec::new();
+    for name in ["one", "two"] {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            StateStore::at(path)
+                .update(|state| {
+                    state.insert(Inbox::new(
+                        name,
+                        format!("{name}@example.test"),
+                        ProviderId::MailTm,
+                        format!("secret:{name}"),
+                        Capabilities::mailtm(),
+                    ));
+                    Ok(())
+                })
+                .expect("locked update");
+        }));
+    }
+    barrier.wait();
+    for thread in threads {
+        thread.join().expect("thread");
+    }
+    let state = StateStore::at(&path).load().expect("migrated state");
+    assert_eq!(state.schema_version, 2);
+    assert!(state.inboxes.contains_key("one"));
+    assert!(state.inboxes.contains_key("two"));
 }
 
 #[test]

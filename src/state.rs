@@ -1,4 +1,4 @@
-use crate::core::{Acknowledgements, Inbox, MessageKey};
+use crate::core::{Acknowledgements, Inbox, MessageKey, ProviderId};
 use crate::error::AppError;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,25 @@ impl AppState {
         Ok(inbox)
     }
 
+    pub fn remove_matching(
+        &mut self,
+        name: &str,
+        provider: ProviderId,
+        secret_ref: &str,
+    ) -> Result<Option<Inbox>, AppError> {
+        let Some(current) = self.inboxes.get(name) else {
+            return Ok(None);
+        };
+        if current.provider != provider || current.secret_ref != secret_ref {
+            return Err(AppError::new(
+                "state_conflict",
+                "inbox name now refers to a different inbox",
+                10,
+            ));
+        }
+        self.remove(name).map(Some)
+    }
+
     pub fn acknowledge(
         &mut self,
         inbox: &str,
@@ -116,40 +135,28 @@ impl StateStore {
         }
         let bytes = fs::read(&self.path)
             .map_err(|error| AppError::state("state_read", error.to_string()))?;
-        let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
             AppError::state("state_corrupt", format!("state file is invalid: {error}"))
         })?;
         let version = value
             .get("schema_version")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(1);
+        if version == 2 {
+            return serde_json::from_value(value).map_err(|error| {
+                AppError::state("state_corrupt", format!("state file is invalid: {error}"))
+            });
+        }
         if version > 2 {
             return Err(AppError::state(
                 "state_schema",
                 format!("unsupported state schema: {version}"),
             ));
         }
-        if version == 1 {
-            let backup = self.path.with_extension("json.v1.bak");
-            fs::copy(&self.path, &backup)
-                .map_err(|error| AppError::state("state_migration", error.to_string()))?;
-            let object = value.as_object_mut().ok_or_else(|| {
-                AppError::state("state_corrupt", "state file root must be an object")
-            })?;
-            migrate_v1_acknowledgements(object)?;
-            object.insert("schema_version".to_owned(), serde_json::Value::from(2));
-        }
-        let state: AppState = serde_json::from_value(value).map_err(|error| {
-            AppError::state("state_corrupt", format!("state file is invalid: {error}"))
-        })?;
-        if version == 1
-            && let Err(error) = self.save(&state)
-        {
-            let backup = self.path.with_extension("json.v1.bak");
-            let _ = fs::copy(backup, &self.path);
-            return Err(error);
-        }
-        Ok(state)
+        let lock = self.lock()?;
+        let result = self.load_locked();
+        let _ = FileExt::unlock(&lock);
+        result
     }
 
     pub fn save(&self, state: &AppState) -> Result<(), AppError> {
@@ -176,7 +183,15 @@ impl StateStore {
         &self,
         mutation: impl FnOnce(&mut AppState) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let _ = self.load()?;
+        let lock = self.lock()?;
+        let mut state = self.load_locked()?;
+        let value = mutation(&mut state)?;
+        let result = self.save_locked(&state);
+        let _ = FileExt::unlock(&lock);
+        result.map(|()| value)
+    }
+
+    fn lock(&self) -> Result<File, AppError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| AppError::state("state_write", error.to_string()))?;
@@ -190,32 +205,49 @@ impl StateStore {
             .map_err(|error| AppError::state("state_lock", error.to_string()))?;
         lock.lock_exclusive()
             .map_err(|error| AppError::state("state_lock", error.to_string()))?;
-        let mut state = if self.path.exists() {
-            let bytes = fs::read(&self.path)
-                .map_err(|error| AppError::state("state_read", error.to_string()))?;
-            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        Ok(lock)
+    }
+
+    fn load_locked(&self) -> Result<AppState, AppError> {
+        if !self.path.exists() {
+            return Ok(AppState::default());
+        }
+        let bytes = fs::read(&self.path)
+            .map_err(|error| AppError::state("state_read", error.to_string()))?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            AppError::state("state_corrupt", format!("state file is invalid: {error}"))
+        })?;
+        let version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1);
+        if version > 2 {
+            return Err(AppError::state(
+                "state_schema",
+                format!("unsupported state schema: {version}"),
+            ));
+        }
+        if version == 1 {
+            let backup = self.path.with_extension("json.v1.bak");
+            fs::copy(&self.path, &backup)
+                .map_err(|error| AppError::state("state_migration", error.to_string()))?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                AppError::state("state_corrupt", "state file root must be an object")
+            })?;
+            migrate_v1_acknowledgements(object)?;
+            object.insert("schema_version".to_owned(), serde_json::Value::from(2));
+            let state: AppState = serde_json::from_value(value).map_err(|error| {
                 AppError::state("state_corrupt", format!("state file is invalid: {error}"))
             })?;
-            let version = value
-                .get("schema_version")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(1);
-            if version != 2 {
-                return Err(AppError::state(
-                    "state_schema",
-                    format!("unsupported state schema: {version}"),
-                ));
+            if let Err(error) = self.save_locked(&state) {
+                let _ = fs::copy(&backup, &self.path);
+                return Err(error);
             }
-            serde_json::from_value(value).map_err(|error| {
-                AppError::state("state_corrupt", format!("state file is invalid: {error}"))
-            })?
-        } else {
-            AppState::default()
-        };
-        let value = mutation(&mut state)?;
-        let result = self.save_locked(&state);
-        let _ = FileExt::unlock(&lock);
-        result.map(|()| value)
+            return Ok(state);
+        }
+        serde_json::from_value(value).map_err(|error| {
+            AppError::state("state_corrupt", format!("state file is invalid: {error}"))
+        })
     }
 
     fn save_locked(&self, state: &AppState) -> Result<(), AppError> {
