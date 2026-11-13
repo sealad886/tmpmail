@@ -11,7 +11,10 @@ if test -n "$(git status --porcelain --untracked-files=normal)"; then
   echo "refusing to package a dirty or untracked working tree" >&2
   exit 1
 fi
-cargo +1.88.0 build --release --locked --target "$target"
+toolchain_cargo=$(rustup which --toolchain 1.88.0 cargo)
+PATH="$(dirname "$toolchain_cargo"):$PATH"
+export PATH
+cargo build --release --locked --target "$target"
 test -x "$binary"
 mkdir -p dist
 package_tmp=$(mktemp -d "dist/.tmpmail-package.XXXXXX")
@@ -25,20 +28,24 @@ cp -R completions "$stage/"
 find "$stage" -type d -exec chmod 0755 {} +
 find "$stage" -type f -exec chmod 0644 {} +
 chmod 0755 "$stage/tmpmail"
-find "$stage" -exec touch -t 200001010000.00 {} +
+find "$stage" -exec env TZ=UTC touch -t 200001010000.00 {} +
+(
+  cd "$package_tmp"
+  find "$name" -print > files.unsorted
+  LC_ALL=C sort files.unsorted > files
+)
 if tar --version 2>/dev/null | grep -q bsdtar; then
   (
     cd "$package_tmp"
-    find "$name" -print | LC_ALL=C sort |
-      tar --no-recursion --format ustar --uid 0 --gid 0 --uname root --gname root -cf - -T -
-  ) | gzip -n > "$archive"
+    tar --no-recursion --format ustar --uid 0 --gid 0 --uname root --gname root -cf archive.tar -T files
+  )
 else
   (
     cd "$package_tmp"
-    find "$name" -print | LC_ALL=C sort |
-      tar --no-recursion --format=ustar --owner=0 --group=0 --numeric-owner -cf - -T -
-  ) | gzip -n > "$archive"
+    tar --no-recursion --format=ustar --owner=0 --group=0 --numeric-owner -cf archive.tar -T files
+  )
 fi
+gzip -n < "$package_tmp/archive.tar" > "$archive"
 if command -v shasum >/dev/null 2>&1; then
   (cd "$(dirname "$archive")" && shasum -a 256 "$(basename "$archive")") > "$archive.sha256"
 else
@@ -46,7 +53,7 @@ else
 fi
 {
   printf 'source_commit=%s\n' "$(git rev-parse HEAD)"
-  printf 'rustc=%s\n' "$(rustc +1.88.0 --version)"
+  printf 'rustc=%s\n' "$(rustc --version)"
   printf 'target=%s\n' "$target"
   printf 'archive=%s\n' "$(basename "$archive")"
   if command -v shasum >/dev/null 2>&1; then

@@ -12,6 +12,12 @@ Status: local release candidate preparation; not tagged or published.
 - Exact latest-message, all-new-message, and opt-in raw MIME source reads.
 - Text-first rendering, inert cached HTML, and streamed safe attachments.
 - Keyring-first secrets with explicit protected-file fallback.
+- Current DropMail bearer authentication, paginated inboxes, and nullable
+  attachment handling.
+- Successful nested help/version requests and explicit watch inbox selection.
+- Networking/TLS dependency security patches within existing version ranges.
+- Packaging now selects Rust 1.88 explicitly, propagates archive/metadata
+  failures, derives the SBOM version from Cargo, and normalizes timestamps in UTC.
 - Platform-standard config, state, cache, locking, migration backup, and atomic
   replacement.
 
