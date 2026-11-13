@@ -40,6 +40,10 @@ fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(parse_error) => {
+            if !parse_error.use_stderr() {
+                let _ = parse_error.print();
+                return ExitCode::SUCCESS;
+            }
             if json_requested {
                 let error = AppError::usage(parse_error.to_string());
                 let envelope = Envelope::<serde_json::Value>::failure(&error, Meta::default());

@@ -7,8 +7,9 @@ attachments, and curated Mail.tm and DropMail backends.
 > Version 2 is under active development. The repository is not yet published as
 > a v2 release.
 
-Mail.tm functionality is powered by [Mail.tm](https://mail.tm). DropMail use
-requires your own current `af_…` API token.
+Mail.tm functionality is powered by [Mail.tm](https://mail.tm). The default
+provider is free and needs no API key. Optional DropMail use requires your own
+[free current `af_…` API token](https://dropmail.me/api/).
 
 ## Build
 
@@ -130,6 +131,8 @@ batches, persists a cursor after each successfully printed event, and exits
 cleanly on Ctrl-C. It does not install a daemon or send desktop notifications.
 Named arguments temporarily include those inboxes. `--all` includes only
 inboxes opted in through `config set inbox.NAME.watch true`.
+`tmpmail --inbox work watch` selects one saved inbox; positional names take
+precedence over `--inbox`. `--all` cannot be combined with either selection.
 
 ## License
 

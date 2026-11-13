@@ -1,4 +1,4 @@
-.TH TMPMAIL 1 "August 2026" "tmpmail 2.0.0" "User Commands"
+.TH TMPMAIL 1 "November 2026" "tmpmail 2.0.0" "User Commands"
 .SH NAME
 tmpmail \- fast multi-backend temporary email
 .SH SYNOPSIS
@@ -32,7 +32,10 @@ List every locally unseen message without acknowledging it.
 Safely stream an attachment into the current directory.
 .TP
 .B tmpmail watch [NAME...] [--all] [--existing]
-Monitor named or all saved inboxes in the foreground until interrupted.
+Monitor named inboxes in the foreground until interrupted. With --all, monitor
+only inboxes opted in with config set inbox.NAME.watch true. With no names,
+--inbox selects one inbox; otherwise the active inbox is used. Positional names
+take precedence over --inbox. --all conflicts with names and --inbox.
 .SH OPTIONS
 .TP
 .B --inbox NAME
@@ -51,8 +54,9 @@ Mail bodies, headers, and filenames are treated as untrusted. HTML is rendered
 as text unless an inert cached representation is explicitly requested. Secret
 tokens are accepted through secure input or stdin, never ordinary arguments.
 .SH PROVIDERS
-Mail.tm functionality is powered by Mail.tm (https://mail.tm). DropMail requires
-a current user-supplied API token.
+Mail.tm functionality is powered by Mail.tm (https://mail.tm). Mail.tm is free
+and needs no API key. DropMail requires a current user-supplied free API token
+from https://dropmail.me/api/.
 .SH SEE ALSO
 .BR open (1),
 .BR xdg-open (1)
