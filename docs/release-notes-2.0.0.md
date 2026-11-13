@@ -15,6 +15,8 @@ Status: local release candidate preparation; not tagged or published.
 - Current DropMail bearer authentication, paginated inboxes, and nullable
   attachment handling.
 - Successful nested help/version requests and explicit watch inbox selection.
+- Enabled network I/O in the shared CLI runtime, fixing panics on real provider
+  requests that adapter-only contract tests did not exercise.
 - Networking/TLS dependency security patches within existing version ranges.
 - Packaging now selects Rust 1.88 explicitly, propagates archive/metadata
   failures, derives the SBOM version from Cargo, and normalizes timestamps in UTC.

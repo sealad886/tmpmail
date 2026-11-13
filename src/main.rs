@@ -459,7 +459,7 @@ enum NetworkAction {
 
 fn run_async(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Result<(), AppError> {
     tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(|error| AppError::new("runtime", error.to_string(), 3))?
         .block_on(run_network(cli, paths, action))

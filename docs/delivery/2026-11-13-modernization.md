@@ -16,6 +16,10 @@ or external account/session creation is authorized by this document.
 - Nested help/version requests exit successfully. Watch honors `--inbox`, gives
   positional names precedence, and rejects combining explicit selection with
   `--all`. README and man page describe these rules.
+- Enabled I/O in the shared CLI runtime after a release-binary public discovery
+  check exposed a panic. A subprocess test uses an isolated silent loopback
+  proxy to verify network timeouts return the JSON error envelope without
+  contacting a provider.
 - Four dependency patch updates clear seven RustSec advisories: rustls
   0.23.43 to 0.23.46, rustls-webpki 0.103.14 to 0.103.16, Tokio 1.53.1 to 1.53.3,
   and webpki-roots 1.0.9 to 1.0.10. No new dependencies were added.
@@ -25,7 +29,7 @@ or external account/session creation is authorized by this document.
 
 ## Verification
 
-- On this macOS arm64 host, Rust 1.88 all-target tests: 75 passed; one reference
+- On this macOS arm64 host, Rust 1.88 all-target tests: 76 passed; one reference
   performance test intentionally ignored in the ordinary suite.
 - Rust 1.88 Clippy with warnings denied: passed. The compiler, Cargo, and Clippy
   were explicitly selected together; an earlier mixed Homebrew/rustup attempt
