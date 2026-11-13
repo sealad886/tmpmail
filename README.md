@@ -4,8 +4,8 @@ Fast, friendly temporary email from your terminal. `tmpmail` 2 is a native Rust
 CLI for macOS and Linux with named inboxes, stable JSON, safe message rendering,
 attachments, and curated Mail.tm and DropMail backends.
 
-> Version 2 is under active development. The repository is not yet published as
-> a v2 release.
+> Version 2 is a release candidate with live-provider acceptance completed.
+> The repository has not yet published a v2 release.
 
 Mail.tm functionality is powered by [Mail.tm](https://mail.tm). The default
 provider is free and needs no API key. Optional DropMail use requires your own
@@ -16,9 +16,12 @@ provider is free and needs no API key. Optional DropMail use requires your own
 Rust 1.88 or newer is required.
 
 ```console
-cargo build --release
+cargo build --release --locked
 ./target/release/tmpmail --help
 ```
+
+To install from this checkout onto your Cargo `PATH`, run
+`cargo install --path . --locked`.
 
 The ordinary CLI does not require `curl`, `jq`, or a terminal web browser.
 Clipboard and explicit browser-opening actions use the platform tools `pbcopy`
@@ -48,6 +51,9 @@ tmpmail config set inbox.work.watch true
 message new` returns all locally unseen messages. Reading acknowledges only
 after output succeeds; `--peek` never acknowledges. Review mode accepts `r`,
 `a`, `s`, and `q` actions followed by a message number where applicable.
+If acknowledgement or state persistence fails after a read is printed, the
+command exits 10 and explains the partial result on stderr; JSON stdout keeps
+its single message envelope. Retry with `tmpmail message ack MESSAGE`.
 Use `tmpmail read MESSAGE --raw` when MIME source is needed; terminal controls
 remain stripped in human output and JSON remains structurally escaped.
 
@@ -87,6 +93,8 @@ Downloads are streamed, size-limited, written through an incomplete sibling
 file, and never opened or executed. Path traversal, reserved names, symbolic
 link replacement, and unrequested overwrite are refused. The default limit is
 25 MiB and can be changed with `config set max_attachment_bytes BYTES`.
+Attachment lists show provider-reported sizes. Mail.tm's size metadata is not
+the decoded byte count; download validation uses HTTP length and streamed bytes.
 
 ## Automation
 
@@ -118,7 +126,8 @@ disabled by default.
 The complete architecture, provider contracts, security choices, and delivery
 evidence live under [`docs/`](docs/).
 
-Prebuilt archives are planned for macOS arm64/x86_64 and Linux arm64/x86_64.
+CI builds candidate archives for macOS arm64/x86_64 and Linux arm64/x86_64.
+Published downloads will accompany the v2 release.
 On Linux, unpack the matching archive, copy `tmpmail` into a directory on
 `PATH`, and optionally install `tmpmail.1` and shell completions. Release
 archives include SHA-256 checksums, a CycloneDX SBOM, and a local provenance

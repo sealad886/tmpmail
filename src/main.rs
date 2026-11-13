@@ -572,16 +572,20 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 &message,
                 MessageRenderOptions { html, open, raw },
             )?;
-            if !peek {
-                acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
-                save_acknowledgement(
-                    paths,
-                    &selected.name,
-                    message_key(&message),
-                    summary_keys(&messages),
-                )?;
+            async {
+                if !peek {
+                    acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
+                    save_acknowledgement(
+                        paths,
+                        &selected.name,
+                        message_key(&message),
+                        summary_keys(&messages),
+                    )?;
+                }
+                persist_credentials(&selected.secret_ref, &credentials)
             }
-            persist_credentials(&selected.secret_ref, &credentials)
+            .await
+            .map_err(message_completion_error)
         }
         NetworkAction::Read {
             message,
@@ -602,16 +606,20 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
                 &message,
                 MessageRenderOptions { html, open, raw },
             )?;
-            if !peek {
-                acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
-                save_acknowledgement(
-                    paths,
-                    &selected.name,
-                    message_key(&message),
-                    summary_keys(&visible),
-                )?;
+            async {
+                if !peek {
+                    acknowledge_message(&mailtm, &mut credentials, &message.id).await?;
+                    save_acknowledgement(
+                        paths,
+                        &selected.name,
+                        message_key(&message),
+                        summary_keys(&visible),
+                    )?;
+                }
+                persist_credentials(&selected.secret_ref, &credentials)
             }
-            persist_credentials(&selected.secret_ref, &credentials)
+            .await
+            .map_err(message_completion_error)
         }
         NetworkAction::New(inbox) => {
             let (selected, mut credentials) = selected_credentials(paths, inbox.as_deref())?;
@@ -681,7 +689,12 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             let human = message
                 .attachments
                 .iter()
-                .map(|item| format!("{}\t{}\t{} bytes", item.id, item.filename, item.size))
+                .map(|item| {
+                    format!(
+                        "{}\t{}\treported size: {}",
+                        item.id, item.filename, item.size
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             output_with_meta(
@@ -720,6 +733,20 @@ async fn run_network(cli: &Cli, paths: &AppPaths, action: NetworkAction) -> Resu
             existing,
         } => watch_inboxes(cli, paths, &mailtm, timeout, names, all, existing).await,
     }
+}
+
+fn message_completion_error(cause: AppError) -> AppError {
+    eprintln!(
+        "tmpmail: message was displayed, but acknowledgment or credential storage failed ({}); unread state may be unchanged",
+        cause.code()
+    );
+    AppError::new(
+        "partial_operation",
+        "message was displayed but completion failed",
+        10,
+    )
+    .with_retryable(cause.retryable())
+    .silent()
 }
 
 fn render_ack_partial<T>(
@@ -1589,6 +1616,17 @@ struct AttachmentSaveRequest {
     force: bool,
 }
 
+fn attachment_download_size(
+    provider: ProviderId,
+    reported_size: u64,
+    content_length: Option<u64>,
+) -> Option<u64> {
+    // Mail.tm's reported size is not the decoded download length.
+    (provider == ProviderId::DropMail && reported_size != 0)
+        .then_some(reported_size)
+        .or(content_length)
+}
+
 async fn save_attachment(
     cli: &Cli,
     paths: &AppPaths,
@@ -1634,7 +1672,14 @@ async fn save_attachment(
     }
     .map_err(|error| error.into_app_error())?;
     let limit = ConfigStore::at(&paths.config).load()?.max_attachment_bytes;
-    if attachment.size > limit || response.content_length().is_some_and(|size| size > limit) {
+    let expected_size = attachment_download_size(
+        selected.provider,
+        attachment.size,
+        response.content_length(),
+    );
+    if expected_size.is_some_and(|size| size > limit)
+        || response.content_length().is_some_and(|size| size > limit)
+    {
         return Err(AppError::new(
             "attachment_too_large",
             "attachment exceeds configured size limit",
@@ -1666,10 +1711,10 @@ async fn save_attachment(
         }
         file.sync_all()
             .map_err(|error| AppError::state("attachment_write", error.to_string()))?;
-        if attachment.size != 0 && received != attachment.size {
+        if expected_size.is_some_and(|size| received != size) {
             return Err(AppError::new(
                 "attachment_truncated",
-                "attachment size did not match provider metadata",
+                "attachment size did not match download length",
                 5,
             ));
         }
@@ -1918,15 +1963,6 @@ fn output_message(
             body
         )
     };
-    output_with_meta(
-        cli,
-        json!({"message": message}),
-        human,
-        Meta {
-            provider: Some(provider),
-            ..Meta::default()
-        },
-    )?;
     if html {
         let directory = paths.cache.join("messages");
         fs::create_dir_all(&directory).map_err(|e| AppError::state("html_cache", e.to_string()))?;
@@ -1940,7 +1976,15 @@ fn output_message(
             tmpmail::platform::open_browser(&path)?;
         }
     }
-    Ok(())
+    output_with_meta(
+        cli,
+        json!({"message": message}),
+        human,
+        Meta {
+            provider: Some(provider),
+            ..Meta::default()
+        },
+    )
 }
 
 fn output_inboxes(cli: &Cli, state: &AppState) -> Result<(), AppError> {
@@ -2049,4 +2093,41 @@ fn output_with_meta(
         println!("{}", terminal_text(&human));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn post_render_failure_does_not_request_another_stdout_envelope() {
+        let error = message_completion_error(
+            AppError::new("provider_timeout", "provider timed out", 7).with_retryable(true),
+        );
+        assert_eq!(error.code(), "partial_operation");
+        assert_eq!(error.exit_code(), 10);
+        assert!(error.is_silent());
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn download_length_handles_provider_metadata_and_unknown_lengths() {
+        assert_eq!(
+            attachment_download_size(ProviderId::MailTm, 1, Some(67)),
+            Some(67)
+        );
+        assert_eq!(attachment_download_size(ProviderId::MailTm, 1, None), None);
+        assert_eq!(
+            attachment_download_size(ProviderId::DropMail, 67, None),
+            Some(67)
+        );
+        assert_eq!(
+            attachment_download_size(ProviderId::DropMail, 0, None),
+            None
+        );
+        assert_eq!(
+            attachment_download_size(ProviderId::DropMail, 67, Some(0)),
+            Some(67)
+        );
+    }
 }

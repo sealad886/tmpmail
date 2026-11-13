@@ -1,6 +1,7 @@
 # tmpmail 2.0.0 release notes
 
-Status: local release candidate preparation; not tagged or published.
+Status: release candidate with live-provider acceptance completed; not tagged
+or published. Native target CI and final provenance identify the release input.
 
 ## Highlights
 
@@ -17,6 +18,11 @@ Status: local release candidate preparation; not tagged or published.
 - Successful nested help/version requests and explicit watch inbox selection.
 - Enabled network I/O in the shared CLI runtime, fixing panics on real provider
   requests that adapter-only contract tests did not exercise.
+- Mail.tm acknowledgement uses the current merge-patch media type. Attachment
+  validation uses decoded download length rather than unreliable size metadata.
+- Read completion failures preserve a single JSON payload and exit 10, with a
+  diagnostic on stderr. HTML cache preparation happens before successful output.
+- DropMail restoration avoids creating an extra unused random address.
 - Networking/TLS dependency security patches within existing version ranges.
 - Packaging now selects Rust 1.88 explicitly, propagates archive/metadata
   failures, derives the SBOM version from Cargo, and normalizes timestamps in UTC.
@@ -39,11 +45,18 @@ positional message commands, the 1secmail backend, and automatic use of
 `/tmp/tmpmail/email_address` are removed. See
 [the migration guide](migration-v1-to-v2.md).
 
-## Known release gates
+## Acceptance and publication
 
-- Fresh authorized provider canaries remain required before publication.
-- Native runtime/package checks must pass for all four supported targets.
+- Authorized live canaries passed for both providers, including Gmail delivery,
+  attachments, Mail.tm token renewal, and genuine DropMail expiry/restoration.
+  Disposable inboxes, addresses, and test credentials were cleaned up.
+- The native CI matrix covers all four supported targets. See the
+  [qualification evidence](delivery/2026-11-13-modernization.md) and
+  [branch CI](https://github.com/sealad886/tmpmail/actions?query=branch%3Acodex%2Frelease-modernization)
+  for exact-revision results.
 - Final checksums, artifact identities, and provenance must be produced from the
   exact candidate commit.
 - The Homebrew template placeholders must be replaced only after immutable
   release URLs and archive checksums exist.
+- Tagging, release publication, and Homebrew publication require separate
+  authorization.

@@ -23,12 +23,17 @@ Refreshed against official DropMail documentation and `schema.graphql` on
   `downloadUrl`.
 - Message listing uses `mailsConnection` pagination; the legacy `mails` field
   truncates results at 100 messages. Missing or null attachment lists are empty.
+- Restoration creates an empty replacement session with
+  `introduceSession(input: {withAddress: false})`, avoiding an unwanted random
+  address alongside the restored address.
 
 Official references:
 
 - <https://dropmail.me/api/>
 - <https://dropmail.me/api/schema.graphql>
 
-No live token was stored and no live session was created during deterministic
-implementation. Live canary remains a separately authorized external-write
-acceptance gate.
+The authorized November 13, 2026 live canary passed Gmail text/HTML delivery,
+raw reads, exact attachment bytes, acknowledgement, restart, genuine session
+expiry, automatic original-address restoration, and delivery after restoration.
+All test addresses and local inboxes were removed. Empty server sessions expire
+naturally; the API has no explicit session deletion operation.

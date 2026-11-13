@@ -184,7 +184,7 @@ async fn treats_partial_data_and_errors_as_failure() {
 async fn restores_expired_session_then_retries() {
     let (base, handle) = server(vec![
         r#"{"data":{"session":null},"errors":[{"message":"session_not_found","extensions":{"code":"SESSION_NOT_FOUND"}}]}"#,
-        r#"{"data":{"introduceSession":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","addresses":[{"id":"temporary","address":"temporary@drop.test","restoreKey":"temporary-key"}]}}}"#,
+        r#"{"data":{"introduceSession":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","addresses":[]}}}"#,
         r#"{"data":{"restoreAddress":{"id":"restored-address"}}}"#,
         r#"{"data":{"session":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","mailsConnection":{"edges":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
     ]);
@@ -203,6 +203,7 @@ async fn restores_expired_session_then_retries() {
     assert_eq!(credentials.address_id, "restored-address");
     let requests = handle.join().expect("server");
     assert!(requests[1].contains("introduceSession"));
+    assert!(requests[1].contains("withAddress: false"));
     assert!(requests[2].contains("restoreAddress"));
 }
 

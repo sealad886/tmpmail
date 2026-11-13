@@ -1,8 +1,9 @@
 # November 2026 release qualification
 
-Status: local candidate preparation. Publication remains blocked on fresh live
-provider canaries and the other three native target jobs. No release, push, tag,
-or external account/session creation is authorized by this document.
+Status: live-provider acceptance complete; release candidate prepared for
+publication review. User subsequently authorized provider canaries, Gmail test
+messages, test-resource cleanup, and pushing the branch for CI. Tags, releases,
+and package publication remain unauthorized.
 
 ## Completed changes
 
@@ -20,6 +21,12 @@ or external account/session creation is authorized by this document.
   check exposed a panic. A subprocess test uses an isolated silent loopback
   proxy to verify network timeouts return the JSON error envelope without
   contacting a provider.
+- Live canaries exposed Mail.tm's required merge-patch media type and unreliable
+  attachment size metadata. Fixed acknowledgement and decoded download-length
+  validation while retaining HTTP/stream size limits and DropMail raw-size
+  validation. Post-output failures now preserve one message envelope and exit 10.
+- DropMail restoration creates an empty replacement session so it restores only
+  the requested address, without leaving an unused random address.
 - Four dependency patch updates clear seven RustSec advisories: rustls
   0.23.43 to 0.23.46, rustls-webpki 0.103.14 to 0.103.16, Tokio 1.53.1 to 1.53.3,
   and webpki-roots 1.0.9 to 1.0.10. No new dependencies were added.
@@ -29,7 +36,7 @@ or external account/session creation is authorized by this document.
 
 ## Verification
 
-- On this macOS arm64 host, Rust 1.88 all-target tests: 76 passed; one reference
+- On this macOS arm64 host, Rust 1.88 all-target tests: 79 passed; one reference
   performance test intentionally ignored in the ordinary suite.
 - Rust 1.88 Clippy with warnings denied: passed. The compiler, Cargo, and Clippy
   were explicitly selected together; an earlier mixed Homebrew/rustup attempt
@@ -42,10 +49,23 @@ or external account/session creation is authorized by this document.
   the Cargo version appears in the SBOM, and tar failure produces no archive.
 - Independent provider and release-tooling reviews found no remaining blocking
   issues after errors-first GraphQL handling was corrected.
-- Read-only Mail.tm domain discovery succeeded. No authenticated live canary
-  was run; deterministic contract servers do not prove external acceptance.
+- Live Mail.tm acceptance passed creation, Gmail plain/HTML delivery, Unicode,
+  peek/unseen tracking, raw MIME, inert HTML caching, exact 67-byte attachment
+  download, overwrite refusal, remote/local acknowledgement, process restart,
+  and renewal after deliberately invalidating only the test token. A reversible
+  canary-only storage failure verified one JSON payload and partial exit 10.
+- Live DropMail acceptance passed the same message paths, then genuine ten-minute
+  inactivity expiry, automatic same-address restoration, and a new Gmail message
+  received/read after restoration. The empty-session replacement mutation was
+  separately verified live to create zero unwanted addresses.
+- Removed the Mail.tm test account/native credential/local inbox and all DropMail
+  test addresses/local inboxes. Empty DropMail sessions expire naturally.
+- All six jobs passed at the initial candidate `40a3f4c`, including native build,
+  installation, archive validation, and reproducibility for macOS/Linux
+  arm64/x86_64. The follow-up fixes are qualified by the latest
+  [branch CI run](https://github.com/sealad886/tmpmail/actions?query=branch%3Acodex%2Frelease-modernization).
 
-## Candidate artifacts and remaining gates
+## Candidate artifacts and publication steps
 
 After committing the candidate, run from a clean checkout:
 
@@ -58,18 +78,10 @@ After committing the candidate, run from a clean checkout:
 Ignored `dist/` output holds the archive, checksum, and provenance naming the
 exact source revision. A local build is not a published release.
 
-Before shipping:
-
-1. Authorize isolated live canaries for Mail.tm and DropMail: create a test
-   inbox, receive controlled text/HTML plus a harmless attachment, list/read/raw
-   read/download, restart and restore, then remove only those test resources
-   where supported. DropMail requires a current free token supplied through
-   protected input. A controlled sender must also be authorized separately.
-2. Run the existing native matrix for Linux arm64/x86_64 and macOS x86_64, plus
-   macOS arm64, from the exact candidate revision. Pushing the branch or running
-   remote CI requires explicit authorization.
-3. Once all gates pass, obtain publication authorization, produce final assets
-   and checksums, and fill the Homebrew template from immutable release URLs.
+Before publication, require green CI at the exact final branch revision and
+retain the matching archive checksums/provenance. Obtain publication
+authorization, produce immutable release assets, and fill the Homebrew template
+from those URLs and checksums. No release tag or package has been published.
 
 ## Commit context
 

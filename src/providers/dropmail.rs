@@ -324,15 +324,21 @@ impl DropMail {
         match self.session(credentials).await {
             Ok(session) => Ok(session),
             Err(error) if error.failure == ProviderFailure::NotFound => {
-                let replacement = self.create().await?;
+                let data: IntroduceData = self
+                    .graphql(
+                        "mutation RestoreSession { introduceSession(input: {withAddress: false}) { id expiresAt addresses { id address restoreKey } } }",
+                        json!({}),
+                    )
+                    .await?;
+                let replacement = data.introduce_session;
                 let address_id = self
                     .restore_address(
-                        &replacement.session_id,
+                        &replacement.id,
                         &credentials.address,
                         &credentials.restore_key,
                     )
                     .await?;
-                credentials.session_id = replacement.session_id;
+                credentials.session_id = replacement.id;
                 credentials.address_id = address_id;
                 credentials.expires_at = replacement.expires_at;
                 self.session(credentials).await

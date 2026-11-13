@@ -218,6 +218,10 @@ impl MailTm {
             self.client
                 .patch(self.url(&format!("/messages/{id}")))
                 .bearer_auth(token)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/merge-patch+json",
+                )
                 .json(&serde_json::json!({"seen": true}))
                 .send()
                 .await,
