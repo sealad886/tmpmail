@@ -43,6 +43,8 @@ pub struct DropMail {
     client: Client,
     endpoint: String,
     origin: String,
+    token: String,
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for DropMail {
@@ -90,6 +92,7 @@ impl DropMail {
         };
         let client = Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("tmpmail/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| {
@@ -100,8 +103,10 @@ impl DropMail {
             })?;
         Ok(Self {
             client,
-            endpoint: format!("{base}/{token}"),
+            endpoint: format!("{base}/-"),
             origin,
+            token: token.to_owned(),
+            timeout,
         })
     }
 
@@ -124,7 +129,7 @@ impl DropMail {
                 )
             })?;
         Ok(DropMailCredentials {
-            token: self.token_from_endpoint(),
+            token: self.token.clone(),
             session_id: data.introduce_session.id,
             address_id: address.id,
             address: address.address,
@@ -251,18 +256,65 @@ impl DropMail {
         &self,
         credentials: &DropMailCredentials,
     ) -> Result<SessionResource, ProviderError> {
-        let data: SessionData = self
-            .graphql(
-                "query Session($id: ID!) { session(id: $id) { id expiresAt mails { id rawSize fromAddr toAddr receivedAt text html headerSubject downloadUrl attachments { id name mime rawSize downloadUrl } } } }",
-                json!({"id": credentials.session_id}),
-            )
-            .await?;
-        data.session.ok_or_else(|| {
-            error(
-                ProviderFailure::NotFound,
-                "DropMail session expired or was not found",
-            )
-        })
+        tokio::time::timeout(self.timeout, self.session_paginated(credentials))
+            .await
+            .unwrap_or_else(|_| {
+                Err(error(
+                    ProviderFailure::Timeout,
+                    "DropMail session listing timed out",
+                ))
+            })
+    }
+
+    async fn session_paginated(
+        &self,
+        credentials: &DropMailCredentials,
+    ) -> Result<SessionResource, ProviderError> {
+        let mut after: Option<String> = None;
+        let mut mails = Vec::new();
+        for _ in 0..100 {
+            let data: SessionData = self
+                .graphql(
+                    "query Session($id: ID!, $after: String) { session(id: $id) { expiresAt mailsConnection(first: 100, after: $after) { edges { node { id rawSize fromAddr toAddr receivedAt text html headerSubject downloadUrl attachments { id name mime rawSize downloadUrl } } } pageInfo { hasNextPage endCursor } } } }",
+                    json!({"id": credentials.session_id, "after": after}),
+                )
+                .await?;
+            let page = data.session.ok_or_else(|| {
+                error(
+                    ProviderFailure::NotFound,
+                    "DropMail session expired or was not found",
+                )
+            })?;
+            let connection = page.mails_connection;
+            mails.extend(
+                connection
+                    .edges
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|edge| edge.node),
+            );
+            if !connection.page_info.has_next_page {
+                return Ok(SessionResource {
+                    expires_at: page.expires_at,
+                    mails,
+                });
+            }
+            let next = connection
+                .page_info
+                .end_cursor
+                .filter(|next| Some(next) != after.as_ref())
+                .ok_or_else(|| {
+                    error(
+                        ProviderFailure::InvalidResponse,
+                        "DropMail returned an invalid pagination cursor",
+                    )
+                })?;
+            after = Some(next);
+        }
+        Err(error(
+            ProviderFailure::InvalidResponse,
+            "DropMail pagination exceeded the safety limit",
+        ))
     }
 
     async fn session_with_restore(
@@ -298,6 +350,7 @@ impl DropMail {
             .response(
                 self.client
                     .post(&self.endpoint)
+                    .bearer_auth(&self.token)
                     .json(&json!({"query": query, "variables": variables}))
                     .send()
                     .await,
@@ -314,7 +367,7 @@ impl DropMail {
                 "DropMail returned an unexpected content type",
             ));
         }
-        let envelope: GraphQlEnvelope<T> = response.json().await.map_err(|_| {
+        let envelope: GraphQlEnvelope = response.json().await.map_err(|_| {
             error(
                 ProviderFailure::InvalidResponse,
                 "DropMail returned malformed JSON",
@@ -323,10 +376,16 @@ impl DropMail {
         if let Some(first) = envelope.errors.first() {
             return Err(graphql_error(first));
         }
-        envelope.data.ok_or_else(|| {
+        let data = envelope.data.ok_or_else(|| {
             error(
                 ProviderFailure::InvalidResponse,
                 "DropMail response omitted data",
+            )
+        })?;
+        serde_json::from_value(data).map_err(|_| {
+            error(
+                ProviderFailure::InvalidResponse,
+                "DropMail returned malformed data",
             )
         })
     }
@@ -367,14 +426,6 @@ impl DropMail {
                 "DropMail returned an unexpected response",
             )),
         }
-    }
-
-    fn token_from_endpoint(&self) -> String {
-        self.endpoint
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
     }
 }
 
@@ -426,7 +477,10 @@ fn summary(mail: &MailResource) -> MessageSummary {
             .take(120)
             .collect(),
         seen: false,
-        has_attachments: !mail.attachments.is_empty(),
+        has_attachments: mail
+            .attachments
+            .as_ref()
+            .is_some_and(|items| !items.is_empty()),
         size: mail.raw_size,
         created_at: mail.received_at.clone(),
     }
@@ -444,14 +498,19 @@ fn full_message(mail: MailResource) -> Message {
         html: mail.html.into_iter().collect(),
         raw: String::new(),
         seen: false,
-        attachments: mail.attachments.into_iter().map(Into::into).collect(),
+        attachments: mail
+            .attachments
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         created_at: mail.received_at,
     }
 }
 
 #[derive(Deserialize)]
-struct GraphQlEnvelope<T> {
-    data: Option<T>,
+struct GraphQlEnvelope {
+    data: Option<serde_json::Value>,
     #[serde(default)]
     errors: Vec<GraphQlError>,
 }
@@ -492,17 +551,40 @@ struct AddressResource {
 
 #[derive(Deserialize)]
 struct SessionData {
-    session: Option<SessionResource>,
+    session: Option<SessionPage>,
+}
+
+struct SessionResource {
+    expires_at: String,
+    mails: Vec<MailResource>,
 }
 
 #[derive(Deserialize)]
-struct SessionResource {
-    #[allow(dead_code)]
-    id: String,
+struct SessionPage {
     #[serde(rename = "expiresAt")]
     expires_at: String,
-    #[serde(default)]
-    mails: Vec<MailResource>,
+    #[serde(rename = "mailsConnection")]
+    mails_connection: MailConnection,
+}
+
+#[derive(Deserialize)]
+struct MailConnection {
+    edges: Option<Vec<MailEdge>>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+struct MailEdge {
+    node: MailResource,
+}
+
+#[derive(Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -524,7 +606,7 @@ struct MailResource {
     #[serde(default, rename = "downloadUrl")]
     download_url: String,
     #[serde(default)]
-    attachments: Vec<AttachmentResource>,
+    attachments: Option<Vec<AttachmentResource>>,
 }
 
 #[derive(Deserialize)]

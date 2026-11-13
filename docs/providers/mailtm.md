@@ -1,9 +1,10 @@
 # Mail.tm provider contract
 
-Refreshed against official Mail.tm documentation on 2026-08-14.
+Refreshed against official Mail.tm documentation on 2026-11-13.
 
 - API base: `https://api.mail.tm`.
 - Public domain discovery and account creation require no bearer token.
+- API access is free, with no API key or paid tier.
 - Account access uses a JWT obtained from `/token` with mailbox address and
   password. tmpmail stores both in the OS credential store and retries once
   with a fresh JWT after an authentication failure.

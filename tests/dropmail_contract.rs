@@ -32,7 +32,7 @@ fn raw_server() -> (String, thread::JoinHandle<Vec<String>>) {
     let address = listener.local_addr().expect("address");
     let download_url = format!("http://{address}/download/mail-1");
     let session = format!(
-        r#"{{"data":{{"session":{{"id":"session-1","expiresAt":"2026-08-14T00:20:00Z","mails":[{{"id":"mail-1","rawSize":5,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-08-14T00:01:00Z","text":"hello","html":null,"headerSubject":"Subject","downloadUrl":"{download_url}","attachments":[]}}]}}}}}}"#
+        r#"{{"data":{{"session":{{"id":"session-1","expiresAt":"2026-08-14T00:20:00Z","mailsConnection":{{"edges":[{{"node":{{"id":"mail-1","rawSize":5,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-08-14T00:01:00Z","text":"hello","html":null,"headerSubject":"Subject","downloadUrl":"{download_url}","attachments":[]}}}}],"pageInfo":{{"hasNextPage":false,"endCursor":null}}}}}}}}}}"#
     );
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
@@ -111,14 +111,22 @@ async fn creates_session_and_persists_restore_metadata() {
     assert_eq!(created.address, "random@drop.test");
     assert_eq!(created.restore_key, "restore-secret");
     let requests = handle.join().expect("server");
-    assert!(requests[0].starts_with("POST /graphql/af_test-token-current "));
+    assert!(requests[0].starts_with("POST /graphql/- "));
     assert!(requests[0].contains("introduceSession"));
+    assert!(requests[0].contains("authorization: Bearer af_test-token-current"));
+    assert!(
+        !requests[0]
+            .lines()
+            .next()
+            .unwrap()
+            .contains("af_test-token-current")
+    );
 }
 
 #[tokio::test]
 async fn parses_session_mail_and_updates_expiry() {
     let (base, handle) = server(vec![
-        r#"{"data":{"session":{"id":"session-1","expiresAt":"2026-08-14T00:20:00Z","mails":[{"id":"mail-1","rawSize":123,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-08-14T00:01:00Z","text":"hello","html":"<p>hello</p>","headerSubject":"Subject","downloadUrl":"https://dropmail.me/download/mail/1","attachments":[]}]}}}"#,
+        r#"{"data":{"session":{"id":"session-1","expiresAt":"2026-08-14T00:20:00Z","mailsConnection":{"edges":[{"node":{"id":"mail-1","rawSize":123,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-08-14T00:01:00Z","text":"hello","html":"<p>hello</p>","headerSubject":"Subject","downloadUrl":"https://dropmail.me/download/mail/1","attachments":[]}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
     ]);
     let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
         .expect("provider");
@@ -157,7 +165,7 @@ async fn fetches_raw_source_only_for_explicit_raw_reads() {
 #[tokio::test]
 async fn treats_partial_data_and_errors_as_failure() {
     let (base, handle) = server(vec![
-        r#"{"data":{"session":{"id":"session-1","expiresAt":"x","mails":[]}},"errors":[{"message":"quota","extensions":{"code":"RATE_LIMIT_EXCEEDED","captcha":{"id":"never-solve"}}}]}"#,
+        r#"{"data":{"session":{"id":"session-1","expiresAt":"x","mailsConnection":null}},"errors":[{"message":"quota","extensions":{"code":"RATE_LIMIT_EXCEEDED","captcha":{"id":"never-solve"}}}]}"#,
     ]);
     let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
         .expect("provider");
@@ -178,7 +186,7 @@ async fn restores_expired_session_then_retries() {
         r#"{"data":{"session":null},"errors":[{"message":"session_not_found","extensions":{"code":"SESSION_NOT_FOUND"}}]}"#,
         r#"{"data":{"introduceSession":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","addresses":[{"id":"temporary","address":"temporary@drop.test","restoreKey":"temporary-key"}]}}}"#,
         r#"{"data":{"restoreAddress":{"id":"restored-address"}}}"#,
-        r#"{"data":{"session":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","mails":[]}}}"#,
+        r#"{"data":{"session":{"id":"session-2","expiresAt":"2026-08-14T00:30:00Z","mailsConnection":{"edges":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#,
     ]);
     let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
         .expect("provider");
@@ -238,4 +246,64 @@ async fn uses_schema_correct_delete_address_input() {
     let request = &handle.join().expect("server")[0];
     assert!(request.contains("deleteAddress(input:"));
     assert!(request.contains("addressId"));
+}
+
+#[tokio::test]
+async fn reads_mail_beyond_first_page_and_accepts_null_attachments() {
+    let (base, handle) = server(vec![
+        r#"{"data":{"session":{"expiresAt":"first","mailsConnection":{"edges":[{"node":{"id":"new","rawSize":1,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-11-13T01:00:00Z","text":null,"html":null,"attachments":null}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}}"#,
+        r#"{"data":{"session":{"expiresAt":"last","mailsConnection":{"edges":[{"node":{"id":"old","rawSize":1,"fromAddr":"sender@example.test","toAddr":"random@drop.test","receivedAt":"2026-11-13T00:00:00Z","text":"older body","html":null,"attachments":[]}}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor-2"}}}}}"#,
+    ]);
+    let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
+        .expect("provider");
+    let mut credentials = credentials();
+    let message = provider
+        .message(&mut credentials, "old")
+        .await
+        .expect("older message");
+    assert_eq!(message.text, "older body");
+    assert_eq!(credentials.expires_at, "last");
+    let requests = handle.join().expect("server");
+    assert!(requests[0].contains("mailsConnection(first: 100"));
+    assert!(requests[1].contains("cursor-1"));
+}
+
+#[tokio::test]
+async fn rejects_nonadvancing_pagination() {
+    let (base, handle) = server(vec![
+        r#"{"data":{"session":{"expiresAt":"x","mailsConnection":{"edges":[],"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}}"#,
+        r#"{"data":{"session":{"expiresAt":"x","mailsConnection":{"edges":[],"pageInfo":{"hasNextPage":true,"endCursor":"same"}}}}}"#,
+    ]);
+    let provider = DropMail::with_base_url(base, "af_test-token-current", Duration::from_secs(2))
+        .expect("provider");
+    let error = provider
+        .messages(&mut credentials())
+        .await
+        .expect_err("repeated cursor");
+    assert_eq!(error.failure, ProviderFailure::InvalidResponse);
+    handle.join().expect("server");
+}
+
+#[tokio::test]
+async fn does_not_follow_attachment_redirects() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).expect("read") > 0);
+        stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("redirect");
+    });
+    let provider = DropMail::with_base_url(
+        format!("http://{address}/graphql"),
+        "af_test-token-current",
+        Duration::from_secs(2),
+    )
+    .expect("provider");
+    let error = provider
+        .attachment(&format!("http://{address}/download"))
+        .await
+        .expect_err("redirect");
+    assert_eq!(error.failure, ProviderFailure::InvalidResponse);
+    handle.join().expect("server");
 }

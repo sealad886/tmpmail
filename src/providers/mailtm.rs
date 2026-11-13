@@ -44,6 +44,7 @@ impl MailTm {
     ) -> Result<Self, ProviderError> {
         let client = Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("tmpmail/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| {

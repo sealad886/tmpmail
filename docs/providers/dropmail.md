@@ -1,9 +1,10 @@
 # DropMail provider contract
 
 Refreshed against official DropMail documentation and `schema.graphql` on
-2026-08-14.
+2026-11-13.
 
-- GraphQL endpoint: `https://dropmail.me/api/graphql/${AUTH_TOKEN}`.
+- GraphQL endpoint: `https://dropmail.me/api/graphql/-`, with the token in an
+  `Authorization: Bearer` header rather than the request URL.
 - Current free tokens begin with `af_`. Legacy arbitrary tokens are disabled.
 - Tokens issued before 5 April 2026 were affected by a provider defect and must
   be replaced, not merely renewed.
@@ -20,6 +21,8 @@ Refreshed against official DropMail documentation and `schema.graphql` on
   normalized. CAPTCHA metadata is redacted and automated solving is disabled.
 - Attachment fields follow the current schema: `name`, `mime`, `rawSize`, and
   `downloadUrl`.
+- Message listing uses `mailsConnection` pagination; the legacy `mails` field
+  truncates results at 100 messages. Missing or null attachment lists are empty.
 
 Official references:
 

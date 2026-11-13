@@ -245,3 +245,23 @@ fn credential_debug_output_is_redacted() {
     assert!(!rendered.contains("jwt-secret"));
     assert!(rendered.contains("[REDACTED]"));
 }
+
+#[tokio::test]
+async fn does_not_follow_attachment_redirects() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).expect("read") > 0);
+        stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("redirect");
+    });
+    let provider = MailTm::with_base_url(format!("http://{address}"), Duration::from_secs(2))
+        .expect("provider");
+    let error = provider
+        .attachment("token", "/download")
+        .await
+        .expect_err("redirect");
+    assert_eq!(error.failure, ProviderFailure::InvalidResponse);
+    handle.join().expect("server");
+}
