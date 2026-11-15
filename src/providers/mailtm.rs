@@ -44,6 +44,7 @@ impl MailTm {
     ) -> Result<Self, ProviderError> {
         let client = Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("tmpmail/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| {
@@ -217,6 +218,10 @@ impl MailTm {
             self.client
                 .patch(self.url(&format!("/messages/{id}")))
                 .bearer_auth(token)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/merge-patch+json",
+                )
                 .json(&serde_json::json!({"seen": true}))
                 .send()
                 .await,

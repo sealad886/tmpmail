@@ -70,3 +70,42 @@ fn review_rejects_all_inboxes_mode() {
 fn acknowledgement_requires_at_least_one_message() {
     assert!(Cli::try_parse_from(["tmpmail", "message", "ack"]).is_err());
 }
+
+#[test]
+fn watch_honors_global_inbox_and_explicit_names_take_precedence() {
+    for command in [vec!["watch"], vec!["inbox", "watch"]] {
+        let mut arguments = vec!["tmpmail", "--inbox", "work"];
+        arguments.extend(command);
+        assert_eq!(
+            action(&arguments),
+            Action::InboxWatch {
+                names: vec!["work".to_owned()],
+                all: false,
+                existing: false,
+            }
+        );
+        arguments.push("personal");
+        assert_eq!(
+            action(&arguments),
+            Action::InboxWatch {
+                names: vec!["personal".to_owned()],
+                all: false,
+                existing: false,
+            }
+        );
+    }
+}
+
+#[test]
+fn watch_rejects_all_with_an_explicit_selection() {
+    for arguments in [
+        vec!["tmpmail", "watch", "work", "--all"],
+        vec!["tmpmail", "--inbox", "work", "inbox", "watch", "--all"],
+    ] {
+        let error = Cli::try_parse_from(arguments)
+            .expect("syntax should parse")
+            .validate()
+            .expect_err("selection modes conflict");
+        assert_eq!(error.code(), "usage");
+    }
+}

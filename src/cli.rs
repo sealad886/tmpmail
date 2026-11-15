@@ -43,6 +43,15 @@ impl Cli {
     }
 
     pub fn validate(&self) -> Result<(), AppError> {
+        if let Action::InboxWatch {
+            names, all: true, ..
+        } = self.action()
+            && (!names.is_empty() || self.inbox.is_some())
+        {
+            return Err(AppError::usage(
+                "--all conflicts with named inboxes and --inbox",
+            ));
+        }
         if self.quiet && self.verbose {
             return Err(AppError::usage("--quiet conflicts with --verbose"));
         }
@@ -65,7 +74,7 @@ impl Cli {
     }
 
     pub fn action(&self) -> Action {
-        match &self.command {
+        let mut action = match &self.command {
             None | Some(Command::Ls) => Action::MessageList {
                 inbox: self.inbox.clone(),
             },
@@ -165,7 +174,16 @@ impl Cli {
                 name: name.clone().or_else(|| self.inbox.clone()),
             },
             Some(Command::Doctor) => Action::Doctor,
+        };
+        if let Action::InboxWatch {
+            names, all: false, ..
+        } = &mut action
+            && names.is_empty()
+            && let Some(inbox) = &self.inbox
+        {
+            names.push(inbox.clone());
         }
+        action
     }
 }
 

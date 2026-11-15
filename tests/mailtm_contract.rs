@@ -143,6 +143,24 @@ async fn parses_message_list_and_full_message() {
 }
 
 #[tokio::test]
+async fn acknowledges_with_the_required_merge_patch_media_type() {
+    let (base, handle) = server(vec![Reply {
+        status: "200 OK",
+        content_type: "application/ld+json",
+        body: r#"{"seen":true}"#,
+    }]);
+    let provider = MailTm::with_base_url(base, Duration::from_secs(2)).expect("provider");
+    provider
+        .acknowledge("token", "m1")
+        .await
+        .expect("acknowledge");
+    let request = &handle.join().expect("server")[0];
+    assert!(request.starts_with("PATCH /messages/m1 "));
+    assert!(request.contains("content-type: application/merge-patch+json"));
+    assert!(request.contains(r#"{"seen":true}"#));
+}
+
+#[tokio::test]
 async fn rejects_malformed_json_and_wrong_content_type() {
     let (base, handle) = server(vec![
         Reply {
@@ -244,4 +262,24 @@ fn credential_debug_output_is_redacted() {
     assert!(!rendered.contains("password-secret"));
     assert!(!rendered.contains("jwt-secret"));
     assert!(rendered.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn does_not_follow_attachment_redirects() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).expect("read") > 0);
+        stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("redirect");
+    });
+    let provider = MailTm::with_base_url(format!("http://{address}"), Duration::from_secs(2))
+        .expect("provider");
+    let error = provider
+        .attachment("token", "/download")
+        .await
+        .expect_err("redirect");
+    assert_eq!(error.failure, ProviderFailure::InvalidResponse);
+    handle.join().expect("server");
 }
